@@ -1,25 +1,25 @@
 /**
  * dsh-code-explainer — 宿主半身
  *
- * 监听 agent 的工具执行结果，把命令 / 程序 / 文件写入翻译成非程序员能看懂的中文。
+ * 把 agent 实际执行的代码块逐行翻译成非程序员能看懂的中文，供浏览器半身写在行尾。
  *
  * 数据流：
- *   tools/result（只读观察）
- *     → 本地规则立即生成解释（零成本）
- *     → 首次展开卡片时，可通过 /explain 让当前会话的模型补充一版更通俗的解释
- *     → 结果缓存在内存 + ~/.dsh/dsh-code-explainer/explanations.jsonl
+ *   client 取出工具卡代码块的纯文本
+ *     → POST /line-notes
+ *     → 本地规则立即给每行一句（零成本）
+ *     → 规则认不出的行，用当前会话的模型补一版（真实模型，失败就保留规则结果）
+ *     → 结果缓存在内存 + ~/.dsh/dsh-code-explainer/line-notes.jsonl
  *
  * 纪律：
- *   · 只观察，不修改工具参数、不阻断执行、不写会话日志
+ *   · 只读代码文本，不修改工具调用、不阻断执行、不写会话日志
  *   · 不改变用户当前的模型选择；辅助调用只借用路由
  *   · 发给模型的输入、落盘内容、返回给前端的文字都先做凭据掩码
- *   · 任何失败都降级成规则解释，不影响工具本身
  */
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { DEFAULT_TOOLS, explainWithRules, redact } from './rules.js'
+import { explainCodeLines, redact } from './rules.js'
 
 export const name = 'dsh-code-explainer'
 
@@ -27,24 +27,24 @@ export const name = 'dsh-code-explainer'
 export const inject = ['webServer']
 
 const API_PATH = '/dsh-code-explainer/api'
-const PLUGIN_VERSION = '0.1.0'
-const MAX_BODY = 16 * 1024
-const MAX_CALL_IDS = 120
-const MAX_RECORDS = 500
-const MAX_PERSISTED = 1200
+const PLUGIN_VERSION = '0.2.0'
+const MAX_BODY = 256 * 1024
+const MAX_CODE_CHARS = 20000
+const MAX_AI_LINES = 120
+const MAX_CACHE = 400
+const MAX_PERSISTED = 800
 const PERSIST_LIMIT_BYTES = 8 * 1024 * 1024
 
 const DEFAULT_CONFIG = Object.freeze({
   enabled: true,
-  /** onExpand：首次展开卡片时才请求 AI；auto：结果落地就请求；off：只用规则 */
-  llm: 'onExpand',
+  /** auto：规则认不出的行自动请模型补；off：只用规则 */
+  llm: 'auto',
   provider: '',
   model: '',
-  maxInputChars: 6000,
-  maxOutputTokens: 500,
-  timeoutMs: 20000,
+  maxInputChars: 8000,
+  maxOutputTokens: 900,
+  timeoutMs: 25000,
   concurrency: 2,
-  tools: [...DEFAULT_TOOLS],
 })
 
 /* ── 小工具 ─────────────────────────────────────────────────────────── */
@@ -66,46 +66,21 @@ function intIn(value, fallback, min, max) {
 
 function normalizeConfig(input) {
   const raw = input && typeof input === 'object' ? input : {}
-  const llm = raw.llm === 'auto' || raw.llm === 'off' || raw.llm === 'onExpand' ? raw.llm : DEFAULT_CONFIG.llm
   let provider = str(raw.provider).trim()
   let model = str(raw.model).trim()
-  // provider 与 model 必须成对出现，否则退回会话路由
   if (!provider || !model) {
     provider = ''
     model = ''
   }
-  const tools =
-    Array.isArray(raw.tools) && raw.tools.length > 0
-      ? raw.tools.map((item) => str(item).trim()).filter(Boolean).slice(0, 30)
-      : [...DEFAULT_TOOLS]
   return {
     enabled: raw.enabled !== false,
-    llm,
+    llm: raw.llm === 'off' ? 'off' : 'auto',
     provider,
     model,
-    maxInputChars: intIn(raw.maxInputChars, DEFAULT_CONFIG.maxInputChars, 500, 20000),
-    maxOutputTokens: intIn(raw.maxOutputTokens, DEFAULT_CONFIG.maxOutputTokens, 80, 2000),
-    timeoutMs: intIn(raw.timeoutMs, DEFAULT_CONFIG.timeoutMs, 3000, 60000),
+    maxInputChars: intIn(raw.maxInputChars, DEFAULT_CONFIG.maxInputChars, 1000, 20000),
+    maxOutputTokens: intIn(raw.maxOutputTokens, DEFAULT_CONFIG.maxOutputTokens, 200, 2000),
+    timeoutMs: intIn(raw.timeoutMs, DEFAULT_CONFIG.timeoutMs, 5000, 60000),
     concurrency: intIn(raw.concurrency, DEFAULT_CONFIG.concurrency, 1, 4),
-    tools,
-  }
-}
-
-function cleanExplanation(explanation) {
-  const source = explanation && typeof explanation === 'object' ? explanation : {}
-  const steps = Array.isArray(source.steps) ? source.steps : []
-  const risks = Array.isArray(source.risks) ? source.risks : []
-  return {
-    title: redact(clip(str(source.title), 60)).trim() || '这段代码在干什么',
-    purpose: redact(clip(str(source.purpose), 400)).trim(),
-    steps: steps
-      .slice(0, 6)
-      .map((item) => redact(clip(str(item), 160)).trim())
-      .filter(Boolean),
-    risks: risks
-      .slice(0, 6)
-      .map((item) => redact(clip(str(item), 160)).trim())
-      .filter(Boolean),
   }
 }
 
@@ -153,79 +128,38 @@ async function readJsonBody(req) {
   }
 }
 
-function outputText(result) {
-  const parts = []
-  let total = 0
-  const content = result && result.content
-  if (Array.isArray(content)) {
-    for (const item of content) {
-      if (item && item.type === 'text' && typeof item.text === 'string') {
-        parts.push(clip(item.text, 20000))
-        total += item.text.length
-        if (total > 20000) break
-      }
-    }
-  }
-  if (result && result.error) {
-    parts.push(str(result.error.message || result.error))
-  }
-  return parts.join('\n')
+/** 这一行是否值得解释：空行、纯括号、纯注释跳过 */
+function needsNote(line) {
+  const trimmed = str(line).trim()
+  if (!trimmed) return false
+  if (/^(\/\/|#|\/\*|\*|\*\/)/.test(trimmed)) return false
+  if (/^[(){}\[\];,]+$/.test(trimmed)) return false
+  if (/^\}\s*\)?\s*;?$/.test(trimmed)) return false
+  // 读取结果外面包的工具标记（<path>、<content> 之类）不需要逐行解释
+  if (/^<\/?[a-z][^>]*>$/i.test(trimmed)) return false
+  return true
 }
 
-function normalizeResult(result) {
-  const text = outputText(result)
-  const match = text.match(/\[exit code:\s*(-?\d+)\]/i)
-  const exitCode = match ? Number(match[1]) : null
-  return {
-    ok: !(result && result.isError) && (exitCode === null || exitCode === 0),
-    exitCode,
-    outputExcerpt: redact(clip(text, 1200)),
-  }
-}
-
-/** 供规则哈希与 AI 提示词使用的“这条调用实际做了什么” */
-function argsTextFor(tool, args) {
-  const a = args && typeof args === 'object' ? args : {}
-  const limit = 6000
-  if (tool === 'pwsh' || tool === 'bash' || tool === 'terminal_send') {
-    return clip(str(a.command || a.cmd || a.input || a.text || ''), limit)
-  }
-  if (tool === 'run_code') return clip(str(a.code || a.script || a.command || ''), limit)
-  if (tool === 'write') {
-    return clip(
-      `文件：${str(a.file_path || a.path || '')}\n内容：\n${clip(str(a.content || a.file_text || ''), 5000)}`,
-      limit,
-    )
-  }
-  if (tool === 'edit') {
-    return clip(
-      `文件：${str(a.file_path || a.path || '')}\n旧内容：\n${clip(str(a.old_string || a.old_str || ''), 2500)}\n新内容：\n${clip(str(a.new_string || a.new_str || ''), 2500)}`,
-      limit,
-    )
-  }
-  if (tool === 'str_replace_editor') {
-    return clip(
-      `操作：${str(a.command || '')}\n文件：${str(a.path || '')}\n旧内容：\n${clip(str(a.old_str || ''), 2500)}\n新内容：\n${clip(str(a.new_str || a.file_text || ''), 2500)}`,
-      limit,
-    )
-  }
-  try {
-    return clip(JSON.stringify(a), limit)
-  } catch {
-    return ''
-  }
-}
+const SYSTEM_PROMPT = [
+  '你是一个给完全不懂编程的人解释电脑操作的助手。',
+  '你会收到一段正在被执行的代码，每行前面带行号。',
+  '请为指定的行各写一句日常中文说明：这一行在让电脑做什么。',
+  '要求：',
+  '1. 每条不超过 20 个汉字，不出现函数名、参数名、英文术语、正则。',
+  '2. 不要复述代码，不要贴代码，不要评价好坏，不要给建议。',
+  '3. 只输出一个 JSON 对象，不要 Markdown 代码块，例如：',
+  '{"notes":{"3":"列出目录里的文件","5":"最多等六十秒"}}',
+].join('\n')
 
 /* ── 运行时 ─────────────────────────────────────────────────────────── */
 
-class CodeExplainerRuntime {
+class LineNoteRuntime {
   constructor(ctx, config) {
     this.ctx = ctx
     this.config = config
-    this.records = new Map()
-    this.aiCache = new Map()
-    this.sessionRoutes = new Map()
-    this.fallbackRoute = null
+    this.entries = new Map()
+    this.aiMemory = new Map()
+    this.lastRoute = null
     this.queue = []
     this.active = 0
     this.storeReady = false
@@ -234,35 +168,24 @@ class CodeExplainerRuntime {
     const override = str(process.env.DSH_CODE_EXPLAINER_DIR).trim()
     const base = override || path.join(os.homedir(), '.dsh', 'dsh-code-explainer')
     this.storeDir = base
-    this.storeFile = path.join(base, 'explanations.jsonl')
+    this.storeFile = path.join(base, 'line-notes.jsonl')
   }
 
   start() {
     this.loadPersisted()
     this.ctx.effect(
       () => {
-        const offResult = this.ctx.on('tools/result', (exec, result) => {
-          this.onToolResult(exec, result)
-        })
-        const offSession = this.ctx.on('session/event', (session, event) => {
-          this.onSessionEvent(session, event)
-        })
+        const off = this.ctx.on('session/event', (session, event) => this.onSessionEvent(session, event))
         return () => {
           try {
-            offResult && offResult()
-          } catch {
-            /* ignore */
-          }
-          try {
-            offSession && offSession()
+            off && off()
           } catch {
             /* ignore */
           }
         }
       },
-      'dsh-code-explainer: tool observers',
+      'dsh-code-explainer: session route',
     )
-
     this.ctx.effect(
       () =>
         this.ctx.webServer.register({
@@ -288,8 +211,6 @@ class CodeExplainerRuntime {
     }
   }
 
-  /* ── 事件 ─────────────────────────────────────────────────────────── */
-
   onSessionEvent(session, event) {
     try {
       if (!event || event.type !== 'request/header') return
@@ -298,77 +219,74 @@ class CodeExplainerRuntime {
       const provider = str(config.provider)
       const model = str(config.model)
       if (!provider || !model) return
-      const id = str(session && session.id)
-      if (!id) return
-      this.sessionRoutes.set(id, { provider, model })
-      if (this.sessionRoutes.size > 200) {
-        const oldest = this.sessionRoutes.keys().next().value
-        if (oldest !== undefined) this.sessionRoutes.delete(oldest)
-      }
+      this.lastRoute = { provider, model }
     } catch (error) {
       this.warn('读取会话模型路由失败：' + str(error && error.message))
     }
   }
 
-  onToolResult(exec, result) {
-    try {
-      if (!this.config.enabled) return
-      if (!exec || typeof exec.callId !== 'string' || !exec.callId) return
-      // 只解释根调用；run_code / 子代理里的子调用不重复刷卡片
-      if (exec.parent !== undefined) return
-      const tool = str(exec.name)
-      if (!this.config.tools.includes(tool)) return
+  /* ── 条目 ─────────────────────────────────────────────────────────── */
 
-      const args = exec.arguments && typeof exec.arguments === 'object' ? exec.arguments : {}
-      const normalized = normalizeResult(result)
-      const rule = cleanExplanation(
-        explainWithRules({ tool, args, result: normalized }),
-      )
-      const argsText = redact(clip(argsTextFor(tool, args), this.config.maxInputChars))
-      const hash = crypto
-        .createHash('sha256')
-        .update(tool + '\u0000' + argsText + '\u0000' + normalized.outputExcerpt)
-        .digest('hex')
+  ensureEntry(code, lang) {
+    const hash = crypto.createHash('sha256').update(str(lang) + '\u0000' + code).digest('hex').slice(0, 32)
+    const existing = this.entries.get(hash)
+    if (existing) return existing
+    const ruleNotes = explainCodeLines(code, lang)
+    const entry = {
+      hash,
+      lang: str(lang),
+      lineCount: ruleNotes.length,
+      ruleNotes,
+      aiNotes: this.aiMemory.get(hash) || null,
+      aiStatus: 'off',
+      aiError: '',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+    if (entry.aiNotes) entry.aiStatus = 'done'
+    this.entries.set(hash, entry)
+    this.evict()
+    return entry
+  }
 
-      const now = Date.now()
-      const record = {
-        callId: exec.callId,
-        sessionId: str(exec.agent && exec.agent.session && exec.agent.session.id),
-        tool,
-        argsText,
-        outputExcerpt: normalized.outputExcerpt,
-        ok: normalized.ok,
-        exitCode: normalized.exitCode,
-        hash,
-        rule,
-        ai: null,
-        aiStatus: 'idle',
-        aiError: '',
-        canEnrich: Boolean(this.getLlm()),
-        createdAt: now,
-        updatedAt: now,
-      }
-      this.records.set(record.callId, record)
-      this.evictRecords()
+  mergedNotes(entry) {
+    const out = []
+    for (let i = 0; i < entry.lineCount; i += 1) {
+      out.push(entry.ruleNotes[i] || (entry.aiNotes && entry.aiNotes[i]) || '')
+    }
+    return out
+  }
 
-      if (this.config.llm === 'auto' && record.canEnrich) {
-        this.enqueue(() => this.enrich(record)).catch((error) => {
-          this.warn('自动 AI 解释失败：' + str(error && error.message))
-        })
-      }
-    } catch (error) {
-      this.warn('生成解释失败：' + str(error && error.message))
+  publicEntry(entry) {
+    return {
+      ok: true,
+      hash: entry.hash,
+      notes: this.mergedNotes(entry),
+      aiStatus: entry.aiStatus,
+      aiError: entry.aiError,
+      lines: entry.lineCount,
     }
   }
 
-  evictRecords() {
-    while (this.records.size > MAX_RECORDS) {
-      const oldest = this.records.keys().next().value
+  evict() {
+    while (this.entries.size > MAX_CACHE) {
+      const oldest = this.entries.keys().next().value
       if (oldest === undefined) return
-      const record = this.records.get(oldest)
-      if (record && record.aiStatus === 'running') return
-      this.records.delete(oldest)
+      const entry = this.entries.get(oldest)
+      if (entry && entry.aiStatus === 'running') return
+      this.entries.delete(oldest)
     }
+  }
+
+  unresolvedLines(entry, code) {
+    const lines = str(code).split(/\r?\n/)
+    const out = []
+    for (let i = 0; i < entry.lineCount && i < MAX_AI_LINES; i += 1) {
+      if (entry.ruleNotes[i]) continue
+      if (!needsNote(lines[i])) continue
+      out.push(i)
+    }
+    return out
   }
 
   /* ── LLM ──────────────────────────────────────────────────────────── */
@@ -381,15 +299,13 @@ class CodeExplainerRuntime {
     }
   }
 
-  async resolveRoute(sessionId) {
+  async resolveRoute() {
     const llm = this.getLlm()
     if (!llm || typeof llm.stream !== 'function') return null
     if (this.config.provider && this.config.model) {
       return { provider: this.config.provider, model: this.config.model }
     }
-    const sessionRoute = sessionId ? this.sessionRoutes.get(sessionId) : null
-    if (sessionRoute) return sessionRoute
-    if (this.fallbackRoute) return this.fallbackRoute
+    if (this.lastRoute) return this.lastRoute
     try {
       const providers = typeof llm.listProviders === 'function' ? llm.listProviders() : []
       for (const provider of Array.isArray(providers) ? providers : []) {
@@ -397,10 +313,7 @@ class CodeExplainerRuntime {
         if (!id) continue
         const models = await llm.listModels(id)
         const first = Array.isArray(models) ? models.find((model) => model && model.id) : null
-        if (first) {
-          this.fallbackRoute = { provider: id, model: str(first.id) }
-          return this.fallbackRoute
-        }
+        if (first) return { provider: id, model: str(first.id) }
       }
     } catch (error) {
       this.warn('解析模型路由失败：' + str(error && error.message))
@@ -408,18 +321,18 @@ class CodeExplainerRuntime {
     return null
   }
 
-  buildPrompt(record) {
-    const status = record.ok
-      ? '成功'
-      : `没有成功${record.exitCode === null ? '' : `（返回码 ${record.exitCode}）`}`
+  buildPrompt(code, indexes) {
+    const lines = str(code).split(/\r?\n/)
+    const numbered = []
+    for (let i = 0; i < lines.length && i < MAX_AI_LINES; i += 1) {
+      numbered.push(i + 1 + '| ' + clip(redact(lines[i]), 200))
+    }
+    const targets = indexes.map((i) => i + 1).join('、')
     return [
-      `工具类型：${record.tool}`,
-      '这次操作的内容：',
-      record.argsText || '（没有可读内容）',
+      '请解释这些行号：' + targets,
       '',
-      `执行结果：${status}`,
-      '输出摘要：',
-      record.outputExcerpt || '（没有输出）',
+      '代码：',
+      numbered.join('\n'),
     ].join('\n')
   }
 
@@ -441,7 +354,7 @@ class CodeExplainerRuntime {
       for await (const chunk of stream) {
         if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string') {
           text += chunk.text
-          if (text.length > 8000) break
+          if (text.length > 12000) break
         }
       }
       if (!text.trim()) throw new Error('EMPTY_RESPONSE')
@@ -451,73 +364,55 @@ class CodeExplainerRuntime {
     }
   }
 
-  parseAi(text) {
+  parseNotes(text, indexes, lineCount) {
     let value = str(text).trim()
     value = value.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim()
     const start = value.indexOf('{')
     const end = value.lastIndexOf('}')
     if (start >= 0 && end > start) value = value.slice(start, end + 1)
-    try {
-      const parsed = JSON.parse(value)
-      if (parsed && typeof parsed === 'object') {
-        return cleanExplanation({
-          title: parsed.title,
-          purpose: parsed.purpose,
-          steps: parsed.steps,
-          risks: parsed.risks,
-        })
-      }
-    } catch {
-      /* 模型没按 JSON 返回时，退化成一段普通话解释 */
+    const parsed = JSON.parse(value)
+    const source = parsed && typeof parsed === 'object' ? parsed.notes || parsed : {}
+    const notes = {}
+    for (const [key, raw] of Object.entries(source)) {
+      const lineNo = Number(key)
+      if (!Number.isFinite(lineNo)) continue
+      const index = Math.round(lineNo) - 1
+      if (index < 0 || index >= lineCount) continue
+      if (!indexes.includes(index)) continue
+      const note = clip(redact(str(raw)).trim(), 40)
+      if (note) notes[index] = note
     }
-    return cleanExplanation({
-      title: '补充解释',
-      purpose: text,
-      steps: [],
-      risks: [],
-    })
+    return notes
   }
 
-  async enrich(record) {
-    if (!record || !this.config.enabled) return record
-    if (record.ai) return record
-    if (record.aiStatus === 'running') return record
-    if (!record.canEnrich) {
-      record.aiStatus = 'failed'
-      record.aiError = 'NO_ROUTE'
-      return record
+  async enrich(entry, code) {
+    if (!entry || entry.aiNotes) return entry
+    const indexes = this.unresolvedLines(entry, code)
+    if (indexes.length === 0) {
+      entry.aiStatus = 'done'
+      return entry
     }
-
-    const cached = this.aiCache.get(record.hash)
-    if (cached) {
-      record.ai = cached
-      record.aiStatus = 'done'
-      record.aiError = ''
-      record.updatedAt = Date.now()
-      this.persist(record)
-      return record
-    }
-
-    record.aiStatus = 'running'
-    record.aiError = ''
-    record.updatedAt = Date.now()
+    entry.aiStatus = 'running'
+    entry.aiError = ''
+    entry.updatedAt = Date.now()
     try {
-      const route = await this.resolveRoute(record.sessionId)
+      const route = await this.resolveRoute()
       if (!route) throw new Error('NO_ROUTE')
-      const prompt = clip(this.buildPrompt(record), this.config.maxInputChars)
+      const prompt = clip(this.buildPrompt(code, indexes), this.config.maxInputChars)
       const text = await this.runLlm(route, prompt)
-      const ai = this.parseAi(text)
-      record.ai = ai
-      record.aiStatus = 'done'
-      this.cacheAi(record.hash, ai)
-      this.persist(record)
+      const notes = this.parseNotes(text, indexes, entry.lineCount)
+      if (Object.keys(notes).length === 0) throw new Error('NO_NOTES_PARSED')
+      entry.aiNotes = notes
+      entry.aiStatus = 'done'
+      this.aiMemory.set(entry.hash, notes)
+      this.persist(entry, code)
     } catch (error) {
-      record.aiStatus = 'failed'
-      record.aiError = clip(redact(str(error && error.message) || 'UNKNOWN'), 120)
-      this.warn('AI 解释失败：' + record.aiError)
+      entry.aiStatus = 'failed'
+      entry.aiError = clip(redact(str(error && error.message) || 'UNKNOWN'), 120)
+      this.warn('AI 逐行补充失败：' + entry.aiError)
     }
-    record.updatedAt = Date.now()
-    return record
+    entry.updatedAt = Date.now()
+    return entry
   }
 
   enqueue(task) {
@@ -538,15 +433,6 @@ class CodeExplainerRuntime {
           this.active -= 1
           this.pump()
         })
-    }
-  }
-
-  cacheAi(hash, ai) {
-    if (!hash || !ai) return
-    this.aiCache.set(hash, ai)
-    if (this.aiCache.size > 500) {
-      const oldest = this.aiCache.keys().next().value
-      if (oldest !== undefined) this.aiCache.delete(oldest)
     }
   }
 
@@ -576,38 +462,19 @@ class CodeExplainerRuntime {
         if (!line) continue
         try {
           const stored = JSON.parse(line)
-          if (!stored || typeof stored.callId !== 'string') continue
-          const record = {
-            callId: stored.callId,
-            sessionId: '',
-            tool: str(stored.tool),
-            argsText: '',
-            outputExcerpt: '',
-            ok: stored.ok !== false,
-            exitCode: typeof stored.exitCode === 'number' ? stored.exitCode : null,
-            hash: str(stored.hash),
-            rule: cleanExplanation(stored.rule),
-            ai: stored.ai ? cleanExplanation(stored.ai) : null,
-            aiStatus: stored.ai ? 'done' : 'idle',
-            aiError: '',
-            canEnrich: false,
-            createdAt: Number(stored.createdAt) || Date.now(),
-            updatedAt: Number(stored.updatedAt) || Date.now(),
-          }
-          this.records.set(record.callId, record)
-          if (record.ai && record.hash) this.cacheAi(record.hash, record.ai)
+          if (!stored || typeof stored.hash !== 'string' || !stored.aiNotes) continue
+          this.aiMemory.set(stored.hash, stored.aiNotes)
         } catch {
           /* 单行损坏不影响其它记录 */
         }
       }
-      this.evictRecords()
     } catch (error) {
-      this.warn('读取历史解释失败：' + str(error && error.message))
+      this.warn('读取历史逐行解释失败：' + str(error && error.message))
     }
   }
 
-  persist(record) {
-    if (!record || !record.ai) return
+  persist(entry, code) {
+    if (!entry || !entry.aiNotes) return
     if (!this.ensureStore()) return
     try {
       const stat = fs.statSync(this.storeFile, { throwIfNoEntry: false })
@@ -619,43 +486,22 @@ class CodeExplainerRuntime {
     }
     const payload = {
       v: 1,
-      callId: record.callId,
-      tool: record.tool,
-      ok: record.ok,
-      exitCode: record.exitCode,
-      hash: record.hash,
-      rule: record.rule,
-      ai: record.ai,
-      createdAt: record.createdAt,
-      updatedAt: record.updatedAt,
+      hash: entry.hash,
+      lang: entry.lang,
+      lines: entry.lineCount,
+      codeSample: clip(redact(str(code).split(/\r?\n/).slice(0, 6).join('\n')), 600),
+      aiNotes: entry.aiNotes,
+      createdAt: entry.createdAt,
+      updatedAt: entry.updatedAt,
     }
     try {
       fs.appendFile(this.storeFile, JSON.stringify(payload) + '\n', () => {})
     } catch (error) {
-      this.warn('写入解释缓存失败：' + str(error && error.message))
+      this.warn('写入逐行解释缓存失败：' + str(error && error.message))
     }
   }
 
   /* ── HTTP ─────────────────────────────────────────────────────────── */
-
-  publicRecord(record) {
-    const chosen = record.ai || record.rule
-    return {
-      callId: record.callId,
-      tool: record.tool,
-      title: chosen.title,
-      purpose: chosen.purpose,
-      steps: chosen.steps,
-      risks: chosen.risks,
-      source: record.ai ? 'ai' : 'rule',
-      aiStatus: record.aiStatus,
-      canEnrich: record.canEnrich,
-      ok: record.ok,
-      exitCode: record.exitCode,
-      createdAt: record.createdAt,
-      updatedAt: record.updatedAt,
-    }
-  }
 
   async handleHttp(req, res) {
     const url = new URL(req.url, 'http://127.0.0.1')
@@ -674,65 +520,57 @@ class CodeExplainerRuntime {
         llm: this.config.llm,
         provider: this.config.provider,
         model: this.config.model,
-        records: this.records.size,
+        cache: this.entries.size,
         llmAvailable: Boolean(this.getLlm()),
       })
     }
 
-    if (route === '/explanations' && method === 'GET') {
-      const raw = str(url.searchParams.get('callIds'))
-      const ids = raw
-        .split(',')
-        .map((item) => item.trim())
-        .filter((item) => item && item.length <= 120)
-        .slice(0, MAX_CALL_IDS)
-      const items = []
-      for (const id of ids) {
-        const record = this.records.get(id)
-        if (record) items.push(this.publicRecord(record))
-      }
-      return sendJson(res, 200, { ok: true, items })
-    }
-
-    if (route === '/explain' && method === 'POST') {
+    if (route === '/line-notes' && method === 'POST') {
       let body
       try {
         body = await readJsonBody(req)
       } catch (error) {
         return sendJson(res, 400, { ok: false, error: str(error && error.code) || 'BAD_BODY' })
       }
-      const callId = str(body.callId).trim()
-      const record = callId ? this.records.get(callId) : null
-      if (!record) return sendJson(res, 404, { ok: false, error: 'NOT_FOUND' })
-      if (record.ai || record.aiStatus === 'running') {
-        return sendJson(res, 200, { ok: true, item: this.publicRecord(record) })
+      const code = clip(str(body.code), MAX_CODE_CHARS)
+      const lang = clip(str(body.lang), 40)
+      if (!code.trim()) return sendJson(res, 400, { ok: false, error: 'EMPTY_CODE' })
+      // 工具卡还在跑的时候前端只取规则结果，别让半截代码也去烧模型
+      const allowAi = body.ai !== false
+      const entry = this.ensureEntry(code, lang)
+      if (allowAi && this.config.llm === 'auto' && !entry.aiNotes && entry.aiStatus === 'off') {
+        const indexes = this.unresolvedLines(entry, code)
+        if (indexes.length > 0) {
+          entry.aiStatus = 'running'
+          entry.updatedAt = Date.now()
+          this.enqueue(() => this.enrich(entry, code)).catch((error) => {
+            this.warn('AI 逐行补充失败：' + str(error && error.message))
+          })
+        } else {
+          entry.aiStatus = 'done'
+        }
+      } else if (this.config.llm === 'off' && entry.aiStatus === 'off') {
+        entry.aiStatus = 'off'
       }
-      await this.enrich(record)
-      return sendJson(res, 200, { ok: true, item: this.publicRecord(record) })
+      return sendJson(res, 200, this.publicEntry(entry))
+    }
+
+    if (route === '/line-notes' && method === 'GET') {
+      const hash = str(url.searchParams.get('hash')).trim()
+      const entry = hash ? this.entries.get(hash) : null
+      if (!entry) return sendJson(res, 404, { ok: false, error: 'NOT_FOUND' })
+      return sendJson(res, 200, this.publicEntry(entry))
     }
 
     return sendJson(res, 404, { ok: false, error: 'NOT_FOUND' })
   }
 }
 
-const SYSTEM_PROMPT = [
-  '你是一个给完全不懂编程的人解释电脑操作的助手。',
-  '你会收到 agent 刚执行的一条命令、程序或文件修改，以及它的执行结果。',
-  '请用日常中文解释：它为什么做这件事、关键步骤是什么、有没有需要留意的后果。',
-  '要求：',
-  '1. 不出现函数名、参数名、正则、stderr 等术语；必须提到时用生活化说法替代。',
-  '2. 不要复述原始命令或代码，不要贴代码。',
-  '3. 不要评价好坏，不要建议用户下一步做什么。',
-  '4. 如果执行失败，用一句话说明“这次没有成功”，不要猜测原因。',
-  '5. 只输出一个 JSON 对象，不要 Markdown 代码块：',
-  '{"title":"不超过16字的短标题","purpose":"一两句话说明目的","steps":["最多4步，每步一句话"],"risks":["最多4条可能的影响；没有就空数组"]}',
-].join('\n')
-
 /* ── 挂载 ───────────────────────────────────────────────────────────── */
 
 export function apply(ctx, rawConfig) {
   const config = normalizeConfig(rawConfig)
   if (!config.enabled) return
-  const runtime = new CodeExplainerRuntime(ctx, config)
+  const runtime = new LineNoteRuntime(ctx, config)
   runtime.start()
 }

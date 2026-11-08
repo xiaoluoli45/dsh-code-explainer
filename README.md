@@ -1,134 +1,159 @@
 # dsh-code-explainer
 
-把 DeepSeek Harness（DSH）里 agent 实际执行的命令、程序和文件修改，翻译成不懂代码的人也能看懂的中文。
+把 DeepSeek Harness（DSH）里 agent 实际执行的代码，**逐行**翻译成不懂编程的人也能看懂的中文。
 
-每条工具调用卡片下方会多出一张默认收起的说明卡：
+解释直接写在工具卡代码块的每一行末尾，灰色注释样式，不额外占用版面：
 
-```text
-▸ 这段代码在干什么   安装项目依赖                     本地规则 · 展开可补充
-    这条指令会安装这个项目需要的第三方代码包。
-    · 读取项目的依赖清单
-    · 从网上下载并安装这些包
-    可能的影响：需要联网；会新增或改动依赖目录和锁文件
-    本地规则解释
+```typescript
+const r = await tools.ops_bash({          // 调用命令行工具，把结果存起来
+  command: "Get-ChildItem -LiteralPath 'D:\\project'",  // 列出文件夹里有哪些文件
+  description: "List directory contents",  // 给这次操作加一句说明
+  timeoutMs: 60000                         // 最多等 60 秒
+});                                        // （纯括号不解释）
+console.log(JSON.stringify(r, null, 2));   // 把结果打印出来
 ```
 
-原始命令、diff、输出仍然留在 DSH 自带的工具卡里，解释卡不重复展示代码。
+空行、纯括号、纯注释行不会硬加说明；太长的注释会随代码一起换行，不会盖住原代码。
+
+工具跑完的**输出区**也解释，但按输出类型区别对待：
+
+```text
+输入（灰 //）  command: "Get-ChildItem -LiteralPath 'D:\\project'"   // 列出文件夹里有哪些文件
+
+输出（蓝 →）   const r = await tools.ops_bash({                     → 调用命令行工具，把结果存起来
+               console.log(JSON.stringify(r, null, 2));              → 把结果打印出来
+```
+
+- 输出是**代码**（读到的源码、脚本片段、diff）：逐行加行尾说明，用蓝色 `→`，和输入区分。
+- 输出是**普通文本**（目录清单、日志、纯数据）：块首加一句「这段输出是……」，只给关键行加说明（报错、退出码、找不到文件等），不逐行硬凑。
+
+## 长什么样
+
+- 注释挂在每一行的行尾（CSS `::after`），颜色比代码淡，和语法高亮并存。
+- 输入用灰色 `//`，输出用蓝色 `→`，一眼能分清哪条说的是「要执行的代码」、哪条说的是「执行结果」。
+- 代码块右上角多一个「注释：开 / 注释：关」开关，点一下可以在所有代码块和输出区上隐藏/显示注释，状态记在浏览器 `localStorage`。
+- 复制按钮复制到的仍然是**原始代码**：注释不在 DOM 文本里，不会被复制；选中代码时也不会带上注释。
+- 不再有工具卡下方的独立说明卡，避免同一件事出现两套解释。
 
 ## 解释什么
 
-| 工具 | 说明 |
+| 对象 | 例子 |
 | --- | --- |
-| `pwsh` / `bash` | 命令目的、关键动作、风险（删除、联网、装包、上传、改系统设置等） |
-| `run_code` | 程序大致在做什么；能识别代码里的常见文件/网络操作 |
-| `write` | 往哪个文件写入、大概多少内容、是否覆盖原文件 |
-| `edit` / `str_replace_editor` | 修改哪个文件、替换哪一段、可能的副作用 |
-| `terminal_send` | 向正在运行的终端输入内容，以及为什么可能立即生效 |
+| 命令行 | `Get-ChildItem` → 列出文件夹里有哪些文件；`Remove-Item -Recurse` → 删除指定的文件或文件夹；`npm install` → 安装项目需要的第三方代码包 |
+| 工具调用 | `await tools.ops_bash({...})` → 调用命令行工具，把结果存起来 |
+| 参数行 | `command:` → 要执行的命令；`description:` → 给这次操作加一句说明；`timeoutMs: 60000` → 最多等 60 秒 |
+| 常见语句 | `console.log(...)` → 把结果打印出来；`return` → 把结果交回去；`if (...)` → 先判断一个条件；`for (...)` → 重复处理每一项 |
+| 赋值/等待 | `const x = await ...` → 等这一步做完，把结果存起来 |
 
-`read`、搜索、纯查询类工具默认不解释，避免刷屏。工具名单可在配置里改。
+规则覆盖不到的复杂行，交给模型补一句（见下）。
 
 ## 安装
 
 要求：DSH `>= 0.2.0`，Node `>= 20`。
 
 ```powershell
-# 方式一：命令行（与现有第三方插件相同）
 dsh plugin --profile desktop add "link:<本仓库目录的绝对路径>"
-
-# 方式二：插件管理器
-plugin_manager install_bundle target='<本仓库目录的绝对路径>'
 ```
 
-装完刷新 DSH 页面（`Ctrl+Shift+R`）或重启宿主。卸载：
+装完刷新 DSH 页面（`Ctrl+R`）或重启宿主。卸载：
 
 ```powershell
 dsh plugin --profile desktop remove dsh-code-explainer
 ```
 
-> 本插件的 `package.json` 声明了 `dsh.bundle.patch`，宿主会把 `cordis.patch.yml` 里的条目挂到 profile 层；不需要改 DSH 安装目录。
+> `package.json` 声明了 `dsh.bundle.patch`，宿主会把 `cordis.patch.yml` 挂到 profile 层；不需要改 DSH 安装目录。
 
 ## 配置
 
-编辑 `cordis.patch.yml` 里的 `config`，或在安装时由 profile 传入：
+编辑 `cordis.patch.yml`，或安装时由 profile 传入：
 
 ```yaml
 - insert:
     - id: dsh-code-explainer
       name: './index.js'
       config:
-        llm: onExpand
+        llm: auto
         # provider: deepseek-official
         # model: deepseek-chat
 ```
 
 | 键 | 默认 | 含义 |
 | --- | --- | --- |
-| `enabled` | `true` | 总开关；`false` 时完全不上报解释 |
-| `llm` | `onExpand` | `onExpand` 首次展开卡片才请求 AI；`auto` 工具结果落地就请求；`off` 只用本地规则 |
-| `provider` / `model` | 空 | 显式指定辅助调用模型；留空则复用当前会话最近一次请求的模型路由，再兜底到第一个可用模型 |
-| `maxInputChars` | `6000` | 发给模型的输入上限 |
-| `maxOutputTokens` | `500` | 模型输出上限 |
-| `timeoutMs` | `20000` | 单次 AI 调用超时 |
-| `concurrency` | `2` | `auto` 模式下的并发上限 |
-| `tools` | 见 `rules.js` | 需要解释的工具名列表 |
+| `enabled` | `true` | 总开关；`false` 时插件完全不工作 |
+| `llm` | `auto` | `auto` 规则判不出的行自动请模型补；`off` 只用本地规则，不调用模型 |
+| `provider` / `model` | 空 | 显式指定补充用的模型；留空优先复用当前会话最近一次请求的模型路由，再兜底到第一个可用模型 |
+| `maxInputChars` | `8000` | 发给模型的输入上限 |
+| `maxOutputTokens` | `900` | 模型输出上限 |
+| `timeoutMs` | `25000` | 单次模型调用超时 |
+| `concurrency` | `2` | 模型补充的并发上限 |
+
+页面里的「注释：开/关」是给人用的可见开关，状态存在浏览器本地；`enabled` 是插件级开关，管的是要不要启动。
 
 ## 工作方式
 
-### 宿主半身（`index.js`）
-
-1. 监听 `tools/result`（只读观察事件，回调 `(exec, result)`，不阻断工具执行）。
-2. 从 `exec.name` / `exec.arguments` / `exec.agent.session.id` 和 `result.content` 里取出工具名、参数、退出码、输出摘要。
-3. **本地规则**立即生成一版解释（零成本、零等待）。
-4. 如果配置允许，再通过 `ctx.llm.stream()` 调用模型补充一版更通俗的解释。
-5. 结果放在内存（最多 500 条），AI 解释追加写入 `~/.dsh/dsh-code-explainer/explanations.jsonl`。
-
 ### 浏览器半身（`client.js`）
 
-- DSH 的插槽里没有“在内置工具卡下方追加内容”的位置；`tool.call.toolview` 会整卡替换内置卡片。
-- 工具卡外层有稳定属性 `data-chat-call-id` 与 `data-chat-anchor-key="call:<id>"`，本插件在内置卡片之后插入自己的折叠卡，并用 `MutationObserver` 在 React 重渲染后挂回去。
-- 卡片默认收起；第一次展开时才请求 AI 补充，之后复用缓存。
+1. 在 `[data-chat-call-id]` 里的 `.md-code-block` 上找到**输入**代码块，取出每行文本（`pre > code > span.line`）。
+2. `POST /line-notes` 拿逐行说明；对每个 `.line` 只写 `data-dce-note` 属性。
+3. 说明由 CSS 伪元素渲染：`content: "  // " attr(data-dce-note)`。伪元素不进入 `textContent`，所以复制按钮（读 `pre.textContent`）拿到的仍是原代码，选中也不会带注释。
+4. **输出区**（`[class*="ioText"]`）先分类：代码 → 去掉 `1: ` 行号后按行说明；JSON/日志/清单/普通文本 → 块首插 `.dce-io-head` 总述，关键行写 `data-dce-onote`（蓝色 `→`）。按行拆分时只用 `<span class="dce-ol">` 保留原文字与换行，说明仍走伪元素。
+5. `MutationObserver` 观察会话 DOM；React 重渲染后自动补回属性。每 3 秒还会兜底扫一次。
+6. 开关按钮插在代码块自己的标题栏里（`[data-code-block-banner]`），不额外加卡片。
+7. 工具卡还在运行时（`data-state="running"`）只取规则结果，等状态结束再请模型补，避免半截代码反复调用模型。
+
+### 宿主半身（`index.js`）
+
+1. `POST /line-notes` 收到代码文本后，先用本地规则逐行给结果（零成本、零等待）。
+2. 规则给不出说明的行，用 `ctx.llm.stream()` 请模型按行号补一句；只补缺的行，按内容哈希缓存，同一段代码不重复请求。
+3. 模型输出必须是 `{"notes":{"行号":"说明"}}`；解析失败、超时、没有可用模型时保留规则结果，不阻塞页面。
+4. 模型补充结果写入 `~/.dsh/dsh-code-explainer/line-notes.jsonl`（最多读回最近 800 条）。
 
 ### 本地 HTTP 接口
 
-前缀：`/dsh-code-explainer/api`，只接受回环地址。
+前缀 `/dsh-code-explainer/api`，只接受回环地址。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/health` | 存活检查 |
-| GET | `/state` | 开关、LLM 模式、记录数、模型是否可用 |
-| GET | `/explanations?callIds=a,b` | 按调用 id 批量取解释（只返回展示字段） |
-| POST | `/explain` | `{callId}`，按需生成 AI 补充解释 |
+| GET | `/state` | 开关、模型模式、缓存条数、模型是否可用 |
+| POST | `/line-notes` | `{code, lang, ai}` → 逐行说明；`ai:false` 只给规则结果，模型补充异步进行 |
+| GET | `/line-notes?hash=…` | 取补充后的最新结果（前端在 `aiStatus=running` 时轮询） |
 
 ## 隐私、成本与降级
 
-- **凭据**：`sk-...`、`ghp_...`、`github_pat_...`、`Bearer ...`、`api_key/token/password=...` 在展示、落盘、发给模型前都会替换成 `***`。
-- **成本**：默认 `onExpand`，不展开卡片就不调用模型；相同内容按哈希缓存，重复命令不重复请求。
-- **降级**：AI 不可用、超时、返回为空或无法解析时，保留本地规则解释并在卡片上标注；绝不会影响工具执行。
-- **不写会话**：辅助调用不修改用户当前的模型选择，也不向会话日志追加事件。
+- **凭据**：`sk-...`、`ghp_...`、`github_pat_...`、`Bearer ...`、`api_key/token/password=...` 在展示、落盘、发给模型前都替换成 `***`。
+- **成本**：规则优先；只有规则判不出的行才请求模型，且按代码内容哈希缓存，重复代码不重复请求；`llm: off` 可完全关闭模型调用。
+- **降级**：模型不可用、超时、返回为空或 JSON 解析失败时，页面保留规则说明，不会影响工具执行，也不会改用户当前的模型选择。
+- **不写会话**：辅助调用不向会话日志追加事件。
 
 ## 验证到什么程度
 
 已经做过：
 
-- `node --check index.js / rules.js / client.js / test/smoke.mjs` 全部通过。
-- `node test/smoke.mjs` 通过，覆盖：规则解释、凭据掩码、`tools/result` 监听、子调用跳过、HTTP 查询、AI 补充、哈希缓存、无 LLM 降级、落盘脱敏。
-- 扩展点结论来自本机 DSH `0.2.1-rc.5` 的源码与产物（`dsh-tools`、`dsh-llm`、`dsh-client-ui-tool`、`dsh-session`、`dsh-agent-loop`）。
+- `node --check index.js / rules.js / client.js / test/smoke.mjs` 通过。
+- `node test/smoke.mjs` 通过：逐行规则、凭据掩码、HTTP、模型补充、哈希缓存、运行中不请模型、无模型降级、落盘脱敏。
+- 代码块 DOM 契约（`.md-code-block` / `[data-code-block-banner]` / `pre > code > span.line` / 复制读 `pre.textContent`）来自本机 DSH `0.2.1-rc.5` 前端产物的实现。
+- **本机 DSH 0.2.1-rc.5 实测**（`run_code` 读取 `rules.js` 前 15 行并打印）：
+  - 输入 typescript 代码块行尾出现灰色 `//` 注释；
+  - 输出区代码行尾出现蓝色 `→` 注释；
+  - 点复制按钮，剪贴板只得到 6 行原始代码，不含任何注释文字；
+  - 点「注释：开」后注释与输出区总述一起消失、按钮变「注释：关」，再点一次恢复；
+  - 拖选代码行时注释不进入选区；
+  - 模型补充真实生效（`line-notes.jsonl` 里有模型给出的逐行中文，如「文本太长就截短并加省略号」）。
+- 修正过一处：`ops_bash` 的输入 JSON 与输出共用同一 DOM 结构，已按「输入/输出」标签过滤，不会在输入区插总述。
 
-**没有验证**：
+**没有验证**（离线测试不能替代）：
 
-- 没有把插件实际装进 DSH profile，也没有在真实页面里看过卡片位置与折叠效果。
-- 没有跑过真实模型请求；AI 路径只用一个返回固定 JSON 的假 `ctx.llm` 验证了协议形状。
-- 没有验证 DSH 升级后的 DOM 属性与插槽是否保持不变。
-
-因此当前状态是「代码可安装、宿主逻辑有离线证据、UI 未实机验收」。
+- 假 `ctx.llm` 只验证协议形状，不代表真实模型可用；真实模型效果要在 DSH 里实测。
+- 宿主升级后的代码块 DOM 是否保持同样结构，未验证。
 
 ## 已知边界
 
-- 依赖 `data-chat-call-id` 这个 DOM 契约；宿主大改结构时需要同步修改 `client.js` 的选择器。
-- 只解释根工具调用；`run_code` 内部和子代理里的子调用不会单独出卡。
-- 重启后从磁盘加载的历史记录能显示解释，但因为没有原始参数，不再支持继续点开做 AI 补充。
-- 会话模型路由来自 `session/event` 的 `request/header`；插件加载前的历史会话没有捕获到路由时，会兜底到第一个可用模型。
-- “通俗”程度取决于模型本身；提示词禁止术语和代码复述，但不能保证每次完全做到。
+- 依赖宿主代码块的 DOM 契约（`span.line`、`data-code-block-banner`）；DSH 前端大改时需要同步改选择器。
+- 多行字符串里的行也会被当作独立代码行判断，可能出现不准确的注释。
+- 只处理会话里工具卡内的代码块，不处理 markdown 正文里的代码块。
+- 「注释：开/关」是浏览器本地状态，不跟随账号同步。
+- 注释的通俗程度取决于规则覆盖和模型本身；提示词禁止术语和复述代码，但不能保证每条都完美。
 
 ## 开发与测试
 
@@ -139,7 +164,7 @@ node --check client.js
 node test/smoke.mjs
 ```
 
-测试使用临时目录（`DSH_CODE_EXPLAINER_DIR`），不会写入真实的 `~/.dsh` 数据。
+冒烟测试使用临时目录（`DSH_CODE_EXPLAINER_DIR`），不会写入真实的 `~/.dsh` 数据。
 
 ## License
 

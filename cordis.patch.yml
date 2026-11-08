@@ -4,17 +4,19 @@
 # entry 的 name 必须是本包内的相对路径，不能写裸包名。
 #
 # 可配置项（全部可省略，省略即用默认值）：
-#   enabled          true          总开关
-#   llm              onExpand      首次展开卡片时才请求 AI；auto 立即请求；off 只用规则
-#   provider/model   （空）         显式指定辅助调用模型；留空则复用当前会话模型路由
-#   maxInputChars    6000          发给模型的输入上限
-#   maxOutputTokens  500           模型输出上限
-#   timeoutMs        20000         AI 调用超时
-#   concurrency      2             自动模式下并发上限
-#   tools            [...]         需要解释的工具名，默认见 rules.js 的 DEFAULT_TOOLS
+#   enabled          true   总开关（关掉后不注册接口，页面也不会出现行尾注释）
+#   llm              auto   auto：规则判不出的行自动用模型补；off：只用本地规则
+#   provider/model   （空）  显式指定补充用的模型；留空则优先复用当前会话的模型路由
+#   maxInputChars    8000   发给模型的输入上限
+#   maxOutputTokens  900    模型输出上限
+#   timeoutMs        25000  模型调用超时
+#   concurrency      2      自动模式下并发上限
+#
+# 页面里的「注释：开/关」是给使用者的可见开关，状态记在浏览器 localStorage，
+# 与这里的 enabled 是两层：enabled 关掉等于插件整体不工作。
 
 - insert:
     - id: dsh-code-explainer
       name: './index.js'
       config:
-        llm: onExpand
+        llm: auto
