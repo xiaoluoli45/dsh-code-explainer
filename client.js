@@ -9,6 +9,8 @@
  * 为什么这样做：
  *   · 说明只挂在 CSS ::after 上，不往 <pre> 里塞文本节点，所以复制得到的仍是原始代码；
  *   · 不替换、不重排宿主的高亮 DOM，语法高亮、行号、换行开关都保持原样；
+ *   · 代码块底部再挂一条默认收起的「为什么这么写」，讲通用写法与术语，
+ *     展开内容同样不进 <pre>，不影响复制和选中；
  *   · 顶部保留一个全局开关「注释：开/关」，一键回到纯代码视图（状态存在 localStorage）。
  *
  * 宿主契约：window.__ModuleLoader__.load({ id, factory }) + exports.inject / apply(ctx)
@@ -27,6 +29,7 @@ window.__ModuleLoader__.load({
     var ATTR_ONOTE = 'data-dce-onote'
     var ATTR_HASH = 'data-dce-hash'
     var ATTR_MODE = 'data-dce-mode'
+    var ATTR_LEARN = 'data-dce-learn'
 
     var notesCache = Object.create(null)
     var inflight = Object.create(null)
@@ -34,6 +37,7 @@ window.__ModuleLoader__.load({
     var scanTimer = null
     var safetyTimer = null
     var disposed = false
+    var termOwner = Object.create(null)
 
     /* ── 样式 ───────────────────────────────────────────────────────── */
 
@@ -52,6 +56,13 @@ window.__ModuleLoader__.load({
       'opacity:.95;font-style:normal;font-weight:400;',
       'user-select:none;-webkit-user-select:none;pointer-events:none;',
       '}',
+      // 长行：把注释放到下一行，避免被横向滚动裁掉，也不把版面撑宽
+      ':root.dce-notes-on .md-code-block .line[data-dce-long="1"][data-dce-note]::after{',
+      'content:"// " attr(data-dce-note);display:block;margin-top:1px;padding-left:2ch;',
+      'white-space:normal;line-height:1.45}',
+      ':root.dce-notes-on .md-code-block .line[data-dce-long="1"][data-dce-onote]::after{',
+      'content:"→ " attr(data-dce-onote);display:block;margin-top:1px;padding-left:2ch;',
+      'white-space:normal;line-height:1.45}',
       // 输出文本按行拆成的 span：原样保留文字和换行，说明只走伪元素
       ':root.dce-notes-on .dce-ol[data-dce-onote]::after{',
       'content:"  → " attr(data-dce-onote);',
@@ -59,11 +70,38 @@ window.__ModuleLoader__.load({
       'opacity:.95;font-style:normal;',
       'user-select:none;-webkit-user-select:none;pointer-events:none;',
       '}',
+      ':root.dce-notes-on .dce-ol[data-dce-long="1"][data-dce-onote]::after{',
+      'content:"→ " attr(data-dce-onote);display:block;margin-top:1px;padding-left:2ch;',
+      'white-space:normal;line-height:1.45}',
       // 输出块首的一句总述：关掉开关时整块隐藏，回到纯代码视图
       '.dce-io-head{display:none;font-size:12px;line-height:18px;',
       'color:var(--dsw-alias-label-secondary,#5d7fb5)}',
       ':root.dce-notes-on .dce-io-head{display:block;margin:2px 0 4px;padding:3px 8px;',
       'border-left:2px solid rgba(107,147,214,.55);background:rgba(107,147,214,.08);border-radius:3px}',
+      // 可展开的教学层：默认收起，只留一行「为什么这么写」
+      '.dce-learn{display:none;margin:4px 0 2px;padding-top:4px;',
+      'border-top:1px dashed rgba(128,128,128,.25);font-size:12px;line-height:18px}',
+      ':root.dce-notes-on .dce-learn{display:block}',
+      '.dce-learn-btn{appearance:none;border:0;border-radius:3px;background:transparent;',
+      'color:var(--dsw-alias-label-tertiary,#8b8f96);font-size:11px;line-height:18px;',
+      'padding:0 4px;cursor:pointer;white-space:nowrap}',
+      '.dce-learn-btn:hover{background:rgba(128,128,128,.14)}',
+      '.dce-learn-btn:focus-visible{outline:1px solid currentColor;outline-offset:2px}',
+      '.dce-learn[data-mode="out"] .dce-learn-btn{color:var(--dsw-alias-label-secondary,#6b93d6)}',
+      '.dce-learn-body{display:none;margin:4px 0 2px;padding:6px 8px;border-radius:3px;',
+      'border-left:2px solid rgba(128,128,128,.42);background:rgba(128,128,128,.07)}',
+      '.dce-learn[data-mode="out"] .dce-learn-body{border-left-color:rgba(107,147,214,.55);',
+      'background:rgba(107,147,214,.07)}',
+      '.dce-learn[data-open="1"] .dce-learn-body{display:block}',
+      '.dce-learn-sum{margin:0 0 4px;font-weight:500;color:var(--dsw-alias-label-secondary,#4d5561)}',
+      '.dce-learn-list{margin:0;padding-left:16px}',
+      '.dce-learn-list li{margin:0 0 5px}',
+      '.dce-learn-label{font-weight:600;color:var(--dsw-alias-label-primary,#2f3540)}',
+      '.dce-learn-zh{margin-left:5px;color:var(--dsw-alias-label-tertiary,#8b8f96)}',
+      '.dce-learn-why{margin:1px 0 0;color:var(--dsw-alias-label-secondary,#4d5561)}',
+      '.dce-learn-lines{margin:1px 0 0;color:var(--dsw-alias-label-tertiary,#8b8f96);',
+      'font-style:normal;font-size:11px}',
+      '.dce-learn-terms{margin:4px 0 0;color:var(--dsw-alias-label-tertiary,#8b8f96)}',
       // 顶部开关：小而低调，插在语言标签/复制按钮那一行
       '.dce-toggle{appearance:none;border:0;border-radius:4px;background:transparent;',
       'color:var(--dsw-alias-label-tertiary,#8b8f96);font-size:11px;line-height:18px;',
@@ -173,14 +211,192 @@ window.__ModuleLoader__.load({
         var attr = block.getAttribute(ATTR_MODE) === 'out' ? ATTR_ONOTE : ATTR_NOTE
         var lines = lineNodes(block)
         if (lines.length === 0) lines = block.querySelectorAll('.dce-ol')
+        // 用可见宽度估算一行能放多少字符；长行把注释放到下一行，避免被横向裁掉
+        var container = block.querySelector('pre') || block
+        var avail = container && container.clientWidth ? container.clientWidth : 0
+        var capacity = avail > 0 ? Math.max(16, Math.floor(avail / 7.2)) : 0
         for (var i = 0; i < lines.length; i += 1) {
           var note = entry.notes && entry.notes[i]
           if (note) {
             if (lines[i].getAttribute(attr) !== note) lines[i].setAttribute(attr, note)
-          } else if (lines[i].hasAttribute(attr)) {
-            lines[i].removeAttribute(attr)
+            var long = capacity > 0 && String(lines[i].textContent || '').length + note.length + 4 > capacity
+            var flag = long ? '1' : '0'
+            if (lines[i].getAttribute('data-dce-long') !== flag) lines[i].setAttribute('data-dce-long', flag)
+          } else {
+            if (lines[i].hasAttribute(attr)) lines[i].removeAttribute(attr)
+            if (lines[i].hasAttribute('data-dce-long')) lines[i].removeAttribute('data-dce-long')
           }
         }
+      }
+      applyLearn(hash, entry)
+    }
+
+    /* ── 教学层：可展开的「为什么这么写」 ───────────────────────────── */
+
+    function hasLearn(learn) {
+      if (!learn) return false
+      return Boolean(
+        (learn.patterns && learn.patterns.length) ||
+          learn.summary ||
+          (learn.terms && learn.terms.length),
+      )
+    }
+
+    /** 同一个术语只由第一处代码解释，后续代码块只提示「前面讲过」；同一个 hash 重渲染不重复计数 */
+    function claimTerm(key, owner) {
+      if (!key) return false
+      if (termOwner[key] === undefined) {
+        termOwner[key] = owner
+        return true
+      }
+      return termOwner[key] === owner
+    }
+
+    function makeLearnStrip(mode, owner) {
+      var strip = document.createElement('div')
+      strip.className = 'dce-learn'
+      strip.setAttribute('data-mode', mode)
+      strip.setAttribute(ATTR_LEARN, mode)
+      strip.setAttribute('data-open', '0')
+      strip.__dceOwner = owner
+      var baseText = mode === 'out' ? '输出为什么这么写' : '为什么这么写'
+      var button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'dce-learn-btn'
+      button.textContent = baseText + ' ▸'
+      button.setAttribute('aria-expanded', 'false')
+      button.addEventListener('click', function (event) {
+        event.preventDefault()
+        event.stopPropagation()
+        var open = strip.getAttribute('data-open') === '1'
+        strip.setAttribute('data-open', open ? '0' : '1')
+        button.textContent = baseText + (open ? ' ▸' : ' ▾')
+        button.setAttribute('aria-expanded', String(!open))
+      })
+      button.addEventListener('mousedown', function (event) {
+        event.stopPropagation()
+      })
+      var body = document.createElement('div')
+      body.className = 'dce-learn-body'
+      strip.appendChild(button)
+      strip.appendChild(body)
+      return strip
+    }
+
+    function renderLearn(strip, learn) {
+      var signature = ''
+      try {
+        signature = JSON.stringify(learn)
+      } catch {
+        signature = ''
+      }
+      if (strip.__dceSignature === signature) return
+      strip.__dceSignature = signature
+
+      var body = strip.querySelector('.dce-learn-body')
+      if (!body) return
+      var fragment = document.createDocumentFragment()
+      var owner = strip.__dceOwner
+      var summary = String(learn.summary || '')
+      if (summary) {
+        var head = document.createElement('p')
+        head.className = 'dce-learn-sum'
+        head.textContent = summary
+        fragment.appendChild(head)
+      }
+
+      var patternTerms = Object.create(null)
+      var patterns = Array.isArray(learn.patterns) ? learn.patterns.slice(0, 10) : []
+      if (patterns.length > 0) {
+        var list = document.createElement('ul')
+        list.className = 'dce-learn-list'
+        for (var i = 0; i < patterns.length; i += 1) {
+          var pattern = patterns[i] || {}
+          var key = String(pattern.key || pattern.term || pattern.label || '')
+          if (!key) continue
+          var term = String(pattern.term || '')
+          var zh = String(pattern.zh || '')
+          var why = String(pattern.why || '')
+          if (term) patternTerms[term] = true
+
+          var item = document.createElement('li')
+          var label = document.createElement('span')
+          label.className = 'dce-learn-label'
+          label.textContent = String(pattern.label || key)
+          item.appendChild(label)
+
+          if (zh) {
+            var first = claimTerm(key, owner)
+            var gloss = document.createElement('span')
+            gloss.className = 'dce-learn-zh'
+            gloss.textContent = first ? (term ? term + '（' + zh + '）' : zh) : '同一写法，前面讲过'
+            item.appendChild(gloss)
+          }
+          if (why) {
+            var whyEl = document.createElement('p')
+            whyEl.className = 'dce-learn-why'
+            whyEl.textContent = why
+            item.appendChild(whyEl)
+          }
+          var lines = Array.isArray(pattern.lines) ? pattern.lines : []
+          if (lines.length > 0) {
+            var lineEl = document.createElement('em')
+            lineEl.className = 'dce-learn-lines'
+            lineEl.textContent =
+              lines.length > 1
+                ? '同一个模式，出现 ' + lines.length + ' 次（第 ' + lines.slice(0, 8).join('、') + ' 行）'
+                : '第 ' + lines[0] + ' 行'
+            item.appendChild(lineEl)
+          }
+          list.appendChild(item)
+        }
+        if (list.children.length > 0) fragment.appendChild(list)
+      }
+
+      var terms = Array.isArray(learn.terms) ? learn.terms.slice(0, 12) : []
+      var extra = []
+      for (var t = 0; t < terms.length; t += 1) {
+        var termText = String((terms[t] && terms[t].term) || '')
+        if (!termText || patternTerms[termText]) continue
+        if (!claimTerm(termText, owner)) continue
+        var zhText = String((terms[t] && terms[t].zh) || '')
+        extra.push(zhText ? termText + '（' + zhText + '）' : termText)
+      }
+      if (extra.length > 0) {
+        var termsEl = document.createElement('p')
+        termsEl.className = 'dce-learn-terms'
+        termsEl.textContent = '术语：' + extra.join('、')
+        fragment.appendChild(termsEl)
+      }
+      body.replaceChildren(fragment)
+    }
+
+    function ensureLearn(target, mode, learn) {
+      var strip = target.__dceLearn
+      if (strip && !strip.isConnected) strip = null
+      if (!hasLearn(learn)) {
+        if (strip && strip.parentNode) strip.parentNode.removeChild(strip)
+        target.__dceLearn = null
+        return
+      }
+      if (!strip) {
+        strip = makeLearnStrip(mode, target.getAttribute(ATTR_HASH) || mode)
+        // 放在代码块/输出文本外面，避免挤占代码块自身的高度
+        var parent = target.parentElement
+        if (!parent) return
+        parent.insertBefore(strip, target.nextSibling)
+        target.__dceLearn = strip
+      }
+      renderLearn(strip, learn)
+    }
+
+    function applyLearn(hash, entry) {
+      if (!entry || !entry.learn) return
+      var targets = document.querySelectorAll('[' + ATTR_HASH + '="' + hash + '"]')
+      for (var i = 0; i < targets.length; i += 1) {
+        var target = targets[i]
+        var mode = target.getAttribute(ATTR_MODE) === 'out' ? 'out' : 'in'
+        ensureLearn(target, mode, entry.learn)
       }
     }
 
@@ -198,6 +414,7 @@ window.__ModuleLoader__.load({
             var previous = notesCache[localHash] || {}
             var entry = {
               notes: Array.isArray(data.notes) ? data.notes : previous.notes,
+              learn: data.learn || previous.learn,
               aiStatus: data.aiStatus || 'done',
               serverHash: serverHash,
             }
@@ -239,6 +456,7 @@ window.__ModuleLoader__.load({
           if (!data || !data.ok || !Array.isArray(data.notes)) return
           var entry = {
             notes: data.notes,
+            learn: data.learn || null,
             aiStatus: data.aiStatus || 'done',
             serverHash: data.hash || '',
           }
@@ -519,6 +737,11 @@ window.__ModuleLoader__.load({
       }
       var lines = document.querySelectorAll('[' + ATTR_NOTE + ']')
       for (var j = 0; j < lines.length; j += 1) lines[j].removeAttribute(ATTR_NOTE)
+      var strips = document.querySelectorAll('[' + ATTR_LEARN + ']')
+      for (var k = 0; k < strips.length; k += 1) {
+        if (strips[k].parentNode) strips[k].parentNode.removeChild(strips[k])
+      }
+      termOwner = Object.create(null)
     }
 
     function start() {

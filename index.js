@@ -19,7 +19,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { explainCodeLines, redact } from './rules.js'
+import { explainCodeLines, redact, teachCode } from './rules.js'
 
 export const name = 'dsh-code-explainer'
 
@@ -27,7 +27,7 @@ export const name = 'dsh-code-explainer'
 export const inject = ['webServer']
 
 const API_PATH = '/dsh-code-explainer/api'
-const PLUGIN_VERSION = '0.2.0'
+const PLUGIN_VERSION = '0.3.0'
 const MAX_BODY = 256 * 1024
 const MAX_CODE_CHARS = 20000
 const MAX_AI_LINES = 120
@@ -141,14 +141,22 @@ function needsNote(line) {
 }
 
 const SYSTEM_PROMPT = [
-  '你是一个给完全不懂编程的人解释电脑操作的助手。',
+  '你是一个给完全不懂编程的人解释电脑操作的助手，目标是让他通过注释慢慢学会写代码。',
   '你会收到一段正在被执行的代码，每行前面带行号。',
-  '请为指定的行各写一句日常中文说明：这一行在让电脑做什么。',
+  '请完成两件事：',
+  '1) notes：为指定的行号各写一句日常中文，说明这一行在让电脑做什么。',
+  '2) learn：总结这段代码里的通用写法，让人下次遇到同类代码也能看懂。',
   '要求：',
-  '1. 每条不超过 20 个汉字，不出现函数名、参数名、英文术语、正则。',
-  '2. 不要复述代码，不要贴代码，不要评价好坏，不要给建议。',
-  '3. 只输出一个 JSON 对象，不要 Markdown 代码块，例如：',
-  '{"notes":{"3":"列出目录里的文件","5":"最多等六十秒"}}',
+  '- notes 每条不超过 20 个汉字，不出现函数名、参数名、英文术语、正则。',
+  '- learn.summary 用一句话概括这段代码；learn.patterns 每项是一条通用写法：',
+  '  key 用英文短标识（同一种写法共用一个 key），label 是中文短标签，',
+  '  term 是术语原文，zh 是术语第一次出现时的中文对照，why 用一句白话讲为什么这么写。',
+  '- 同一种写法只出现一次，不要为每一行重复解释。',
+  '- 不要复述代码，不要贴代码，不要评价好坏，不要给建议。',
+  '- 只输出一个 JSON 对象，不要 Markdown 代码块，例如：',
+  '{"notes":{"3":"列出目录里的文件"},"learn":{"summary":"这段代码调用命令行工具并打印结果。",',
+  '"patterns":[{"key":"await","label":"等异步结果","term":"await","zh":"等待异步操作完成",',
+  '"why":"await 表示等这一步真的跑完再继续。"}],"terms":[{"term":"await","zh":"等待异步操作完成"}]}}',
 ].join('\n')
 
 /* ── 运行时 ─────────────────────────────────────────────────────────── */
@@ -159,6 +167,7 @@ class LineNoteRuntime {
     this.config = config
     this.entries = new Map()
     this.aiMemory = new Map()
+    this.learnMemory = new Map()
     this.lastRoute = null
     this.queue = []
     this.active = 0
@@ -232,18 +241,22 @@ class LineNoteRuntime {
     const existing = this.entries.get(hash)
     if (existing) return existing
     const ruleNotes = explainCodeLines(code, lang)
+    const ruleLearn = teachCode(code, lang)
     const entry = {
       hash,
       lang: str(lang),
       lineCount: ruleNotes.length,
       ruleNotes,
+      ruleLearn,
       aiNotes: this.aiMemory.get(hash) || null,
+      aiLearn: this.learnMemory.get(hash) || null,
       aiStatus: 'off',
       aiError: '',
       createdAt: Date.now(),
       updatedAt: Date.now(),
     }
-    if (entry.aiNotes) entry.aiStatus = 'done'
+    if (entry.aiLearn) entry.aiStatus = 'done'
+    else if (entry.aiNotes && ruleLearn.patterns.length > 0) entry.aiStatus = 'done'
     this.entries.set(hash, entry)
     this.evict()
     return entry
@@ -257,11 +270,55 @@ class LineNoteRuntime {
     return out
   }
 
+  /** 规则给的写法优先；模型只补规则没覆盖到的写法，并去重术语 */
+  mergedLearn(entry) {
+    const rule = entry.ruleLearn || { summary: '', patterns: [], terms: [] }
+    const ai = entry.aiLearn
+    const patterns = (rule.patterns || []).map((pattern) => ({ ...pattern }))
+    if (ai && Array.isArray(ai.patterns)) {
+      const seen = new Set(patterns.map((pattern) => pattern.key))
+      for (const raw of ai.patterns) {
+        if (!raw || typeof raw !== 'object') continue
+        const key = str(raw.key).trim() || str(raw.label).trim()
+        if (!key || seen.has(key)) continue
+        seen.add(key)
+        patterns.push({
+          key,
+          label: clip(redact(str(raw.label).trim() || key), 24),
+          term: clip(redact(str(raw.term).trim() || key), 32),
+          zh: clip(redact(str(raw.zh).trim()), 32),
+          why: clip(redact(str(raw.why).trim()), 90),
+          lines: [],
+        })
+      }
+    }
+    const terms = []
+    const seenTerms = new Set()
+    for (const raw of (rule.terms || []).concat(ai && Array.isArray(ai.terms) ? ai.terms : [])) {
+      const term = str(raw && raw.term).trim()
+      if (!term || seenTerms.has(term)) continue
+      seenTerms.add(term)
+      terms.push({ term, zh: clip(redact(str(raw && raw.zh).trim()), 32) })
+    }
+    return {
+      summary: (ai && str(ai.summary).trim()) || rule.summary || '',
+      patterns,
+      terms,
+    }
+  }
+
+  /** 规则一个写法都没认出来、但确实有内容可讲时，才值得再花一次模型调用去补 */
+  needsLearn(entry, code) {
+    if (!entry.ruleLearn || entry.ruleLearn.patterns.length > 0) return false
+    return str(code).split(/\r?\n/).some((line) => needsNote(line))
+  }
+
   publicEntry(entry) {
     return {
       ok: true,
       hash: entry.hash,
       notes: this.mergedNotes(entry),
+      learn: this.mergedLearn(entry),
       aiStatus: entry.aiStatus,
       aiError: entry.aiError,
       lines: entry.lineCount,
@@ -329,7 +386,8 @@ class LineNoteRuntime {
     }
     const targets = indexes.map((i) => i + 1).join('、')
     return [
-      '请解释这些行号：' + targets,
+      indexes.length > 0 ? '请解释这些行号：' + targets : '这次不需要逐行解释，请重点总结 learn。',
+      '同时总结这段代码里的通用写法（learn）。',
       '',
       '代码：',
       numbered.join('\n'),
@@ -364,13 +422,17 @@ class LineNoteRuntime {
     }
   }
 
-  parseNotes(text, indexes, lineCount) {
+  parseJson(text) {
     let value = str(text).trim()
     value = value.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim()
     const start = value.indexOf('{')
     const end = value.lastIndexOf('}')
     if (start >= 0 && end > start) value = value.slice(start, end + 1)
-    const parsed = JSON.parse(value)
+    return JSON.parse(value)
+  }
+
+  parseNotes(text, indexes, lineCount) {
+    const parsed = this.parseJson(text)
     const source = parsed && typeof parsed === 'object' ? parsed.notes || parsed : {}
     const notes = {}
     for (const [key, raw] of Object.entries(source)) {
@@ -385,13 +447,49 @@ class LineNoteRuntime {
     return notes
   }
 
+  /** 模型返回的通用写法；解析失败或为空就返回 null */
+  parseLearn(text) {
+    const parsed = this.parseJson(text)
+    const raw = parsed && typeof parsed === 'object' ? parsed.learn : null
+    if (!raw || typeof raw !== 'object') return null
+    const patterns = []
+    for (const item of Array.isArray(raw.patterns) ? raw.patterns : []) {
+      if (!item || typeof item !== 'object') continue
+      if (patterns.length >= 10) break
+      const key = clip(redact(str(item.key).trim()), 40)
+      const label = clip(redact(str(item.label).trim()), 24)
+      if (!key && !label) continue
+      patterns.push({
+        key: key || label,
+        label: label || key,
+        term: clip(redact(str(item.term).trim() || key), 32),
+        zh: clip(redact(str(item.zh).trim()), 32),
+        why: clip(redact(str(item.why).trim()), 90),
+      })
+    }
+    const terms = []
+    for (const item of Array.isArray(raw.terms) ? raw.terms : []) {
+      if (!item || typeof item !== 'object') continue
+      if (terms.length >= 12) break
+      const term = clip(redact(str(item.term).trim()), 32)
+      const zh = clip(redact(str(item.zh).trim()), 32)
+      if (!term || !zh) continue
+      terms.push({ term, zh })
+    }
+    const summary = clip(redact(str(raw.summary).trim()), 120)
+    if (!summary && patterns.length === 0 && terms.length === 0) return null
+    return { summary, patterns, terms }
+  }
+
   async enrich(entry, code) {
-    if (!entry || entry.aiNotes) return entry
+    if (!entry) return entry
     const indexes = this.unresolvedLines(entry, code)
-    if (indexes.length === 0) {
+    const needLearn = this.needsLearn(entry, code) && !entry.aiLearn
+    if (indexes.length === 0 && !needLearn) {
       entry.aiStatus = 'done'
       return entry
     }
+    if (entry.aiNotes && !needLearn) return entry
     entry.aiStatus = 'running'
     entry.aiError = ''
     entry.updatedAt = Date.now()
@@ -400,11 +498,19 @@ class LineNoteRuntime {
       if (!route) throw new Error('NO_ROUTE')
       const prompt = clip(this.buildPrompt(code, indexes), this.config.maxInputChars)
       const text = await this.runLlm(route, prompt)
-      const notes = this.parseNotes(text, indexes, entry.lineCount)
-      if (Object.keys(notes).length === 0) throw new Error('NO_NOTES_PARSED')
-      entry.aiNotes = notes
+      const notes = indexes.length > 0 ? this.parseNotes(text, indexes, entry.lineCount) : {}
+      const learn = this.parseLearn(text)
+      const gotNotes = Object.keys(notes).length > 0
+      if (!gotNotes && !learn) throw new Error('NO_NOTES_PARSED')
+      if (gotNotes) {
+        entry.aiNotes = notes
+        this.aiMemory.set(entry.hash, notes)
+      }
+      if (learn) {
+        entry.aiLearn = learn
+        this.learnMemory.set(entry.hash, learn)
+      }
       entry.aiStatus = 'done'
-      this.aiMemory.set(entry.hash, notes)
       this.persist(entry, code)
     } catch (error) {
       entry.aiStatus = 'failed'
@@ -462,8 +568,9 @@ class LineNoteRuntime {
         if (!line) continue
         try {
           const stored = JSON.parse(line)
-          if (!stored || typeof stored.hash !== 'string' || !stored.aiNotes) continue
-          this.aiMemory.set(stored.hash, stored.aiNotes)
+          if (!stored || typeof stored.hash !== 'string') continue
+          if (stored.aiNotes) this.aiMemory.set(stored.hash, stored.aiNotes)
+          if (stored.aiLearn) this.learnMemory.set(stored.hash, stored.aiLearn)
         } catch {
           /* 单行损坏不影响其它记录 */
         }
@@ -474,7 +581,7 @@ class LineNoteRuntime {
   }
 
   persist(entry, code) {
-    if (!entry || !entry.aiNotes) return
+    if (!entry || (!entry.aiNotes && !entry.aiLearn)) return
     if (!this.ensureStore()) return
     try {
       const stat = fs.statSync(this.storeFile, { throwIfNoEntry: false })
@@ -491,6 +598,7 @@ class LineNoteRuntime {
       lines: entry.lineCount,
       codeSample: clip(redact(str(code).split(/\r?\n/).slice(0, 6).join('\n')), 600),
       aiNotes: entry.aiNotes,
+      aiLearn: entry.aiLearn,
       createdAt: entry.createdAt,
       updatedAt: entry.updatedAt,
     }
@@ -538,9 +646,9 @@ class LineNoteRuntime {
       // 工具卡还在跑的时候前端只取规则结果，别让半截代码也去烧模型
       const allowAi = body.ai !== false
       const entry = this.ensureEntry(code, lang)
-      if (allowAi && this.config.llm === 'auto' && !entry.aiNotes && entry.aiStatus === 'off') {
+      if (allowAi && this.config.llm === 'auto' && entry.aiStatus === 'off') {
         const indexes = this.unresolvedLines(entry, code)
-        if (indexes.length > 0) {
+        if (indexes.length > 0 || this.needsLearn(entry, code)) {
           entry.aiStatus = 'running'
           entry.updatedAt = Date.now()
           this.enqueue(() => this.enrich(entry, code)).catch((error) => {

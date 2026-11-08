@@ -11,7 +11,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
-import { explainCodeLines, explainCommandLine, redact } from '../rules.js'
+import { explainCodeLines, explainCommandLine, redact, teachCode, teachLine } from '../rules.js'
 
 const API = '/dsh-code-explainer/api'
 // 运行时拼出的假凭据：只用于验证掩码，不写入仓库中的任何真实 Key
@@ -142,9 +142,36 @@ const redacted = redact('curl -H "Authorization: Bearer ' + FAKE_KEY + '" https:
 assert.ok(!redacted.includes(FAKE_KEY))
 assert.ok(redacted.includes('***'))
 
+// 教学层：按行识别通用写法，同一种写法聚合成一条并记下行号
+assert.equal(teachLine('});'), null)
+assert.equal(teachLine('const x = await foo()').key, 'await')
+const learn = teachCode(SAMPLE, 'typescript')
+assert.ok(learn.summary.includes('等异步结果'))
+assert.equal(learn.patterns[0].key, 'await')
+assert.deepEqual(learn.patterns[0].lines, [1])
+assert.deepEqual(learn.patterns.find((p) => p.key === 'timeoutMs').lines, [4])
+assert.deepEqual(learn.patterns.find((p) => p.key === 'command').lines, [2])
+assert.ok(learn.patterns.find((p) => p.key === 'arrow').why.includes('简写'))
+assert.ok(learn.terms.some((t) => t.term === 'timeoutMs'))
+
 /* ── 2. HTTP + AI 补充 ──────────────────────────────────────────────── */
 
-const answer = JSON.stringify({ notes: { 6: '把这几项按大小排好顺序' } })
+const answer = JSON.stringify({
+  notes: { 6: '把这几项按大小排好顺序' },
+  learn: {
+    summary: '这段代码调用命令行工具，把结果排序后打印。',
+    patterns: [
+      {
+        key: 'sort',
+        label: '排序',
+        term: 'sort',
+        zh: '按规则排序',
+        why: '把一组数据按指定规则排好顺序，省得自己写循环。',
+      },
+    ],
+    terms: [{ term: 'sort', zh: '按规则排序' }],
+  },
+})
 const llm = fakeLlm(answer)
 const runtime = createRuntime({ llm })
 
@@ -159,6 +186,8 @@ assert.equal(first.json.aiStatus, 'running')
 assert.equal(first.json.notes[0], '调用命令行工具，把结果存起来')
 assert.equal(first.json.notes[5], '')
 assert.ok(first.json.hash)
+assert.equal(first.json.learn.patterns[0].key, 'await')
+assert.ok(first.json.learn.patterns.some((p) => p.key === 'timeoutMs'))
 
 // 等 AI 队列跑完
 await new Promise((resolve) => setTimeout(resolve, 300))
@@ -166,6 +195,11 @@ const second = await call(runtime.route(), { url: API + '/line-notes?hash=' + fi
 assert.equal(second.statusCode, 200)
 assert.equal(second.json.aiStatus, 'done')
 assert.equal(second.json.notes[5], '把这几项按大小排好顺序')
+assert.equal(second.json.learn.summary, '这段代码调用命令行工具，把结果排序后打印。')
+// 规则认识的写法保留，模型补的写法追加在后面，术语不重复
+assert.equal(second.json.learn.patterns[0].key, 'await')
+assert.ok(second.json.learn.patterns.some((p) => p.key === 'sort'))
+assert.equal(second.json.learn.terms.filter((t) => t.term === 'await').length, 1)
 assert.equal(llm.calls.length, 1)
 assert.equal(llm.calls[0].provider, 'p1')
 assert.equal(llm.calls[0].model, 'm1')

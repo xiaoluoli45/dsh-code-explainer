@@ -274,3 +274,225 @@ export function explainCodeLines(code, lang) {
   const shellLike = SHELL_LANGS.test(str(lang).trim())
   return lines.map((line) => (shellLike ? explainCommandLine(line) : explainCodeLine(line)))
 }
+
+/* ── 教学层：这一行用了什么通用写法 ─────────────────────────────────── */
+
+/**
+ * 每条规则：
+ *   key   —— 模式标识，同一种写法只解释一次
+ *   match —— 命中这行代码的正则
+ *   label —— 短标签，面板里的标题
+ *   term  —— 术语原文（英文）
+ *   zh    —— 术语中文对照，只在第一次出现时展示
+ *   why   —— 为什么这么写 / 这是什么通用写法
+ */
+const TEACH_RULES = [
+  {
+    key: 'async',
+    match: /^\s*(export\s+)?async\s+function\b|\basync\s*\(/,
+    label: '异步函数',
+    term: 'async',
+    zh: '异步函数',
+    why: '标了 async 的函数里才能写 await：它表示这个函数会等耗时任务，而不是一口气跑完。',
+  },
+  {
+    key: 'await',
+    match: /\bawait\b/,
+    label: '等异步结果',
+    term: 'await',
+    zh: '等待异步操作完成',
+    why: 'await 表示等这一步真的跑完、拿到结果后才继续下一行；后面的操作通常是联网、读写文件或跑命令。',
+  },
+  {
+    key: 'tool-call',
+    match: /\btools\.\w+\s*\(/,
+    label: '调用工具',
+    term: 'tools',
+    zh: '宿主提供的工具集',
+    why: '这是 agent 调用外部工具的标准写法：tools 后面跟工具名，括号里传参数对象；换个工具名，写法完全一样。',
+  },
+  {
+    key: 'timeoutMs',
+    match: /\btimeoutMs\s*[:=]/,
+    label: '设置最长等待',
+    term: 'timeoutMs',
+    zh: '超时时间（毫秒）',
+    why: '给命令设一个最长等待时间，超过就主动停下，防止程序一直卡住；60000 就是 60 秒。',
+  },
+  {
+    key: 'command',
+    match: /^\s*command\s*[:=]/,
+    label: '必填的命令',
+    term: 'command',
+    zh: '要执行的命令（必填）',
+    why: '这是一个参数对象：command 是必填项，说明到底要执行什么；description、timeoutMs 都是可选的补充。',
+  },
+  {
+    key: 'options',
+    match: /^\s*(description|desc|cwd|path|file_path|filePath|dir|content|file_text|code|script)\s*[:=]/,
+    label: '可选参数',
+    term: 'options',
+    zh: '参数对象里的可选配置',
+    why: '这些是给工具的可选参数，写在花括号里成对出现：左边是参数名，右边是值。',
+  },
+  {
+    key: 'console.log',
+    match: /\bconsole\.log\s*\(/,
+    label: '打印结果',
+    term: 'console.log',
+    zh: '在控制台打印',
+    why: '把结果打印到控制台，是最常用的查看程序输出方式；调试时想看什么就打印什么。',
+  },
+  {
+    key: 'json',
+    match: /\bJSON\.(parse|stringify)\s*\(/,
+    label: '处理 JSON 数据',
+    term: 'JSON',
+    zh: '一种通用数据格式',
+    why: 'JSON 是程序之间传数据的通用格式：parse 把文字变对象，stringify 把对象变文字。',
+  },
+  {
+    key: 'arrow',
+    match: /=>/,
+    label: '箭头函数',
+    term: '=>',
+    zh: '箭头函数',
+    why: '=> 是写小函数的一种简写：左边是参数，右边是要做的事，常用来给排序、筛选传一段规则。',
+  },
+  {
+    key: 'const',
+    match: /^\s*(const|let|var)\s+\w+\s*=/,
+    label: '声明变量接结果',
+    term: 'const / let',
+    zh: '声明变量',
+    why: '把右边算出来的结果存进左边的名字里，后面直接用；const 表示以后不再改指另一个值。',
+  },
+  {
+    key: 'https',
+    match: /\bfetch\s*\(|\baxios\.|\bInvoke-WebRequest\b|\bInvoke-RestMethod\b/,
+    label: '发网络请求',
+    term: 'fetch',
+    zh: '发网络请求的写法',
+    why: '向一个网址发请求并等它返回数据，通常用于调用接口。',
+  },
+  {
+    key: 'fs',
+    match: /\b(fs|fsp|fs\.promises|readFileSync|writeFileSync|readFile|writeFile)\b/,
+    label: '读写本地文件',
+    term: 'fs',
+    zh: '文件系统模块',
+    why: 'fs 是 Node.js 读写文件的模块；带 Sync 的方法表示读完或写完才继续，简单但会暂时挡住后面的代码。',
+  },
+  {
+    key: 'promise',
+    match: /\.then\s*\(|\.catch\s*\(/,
+    label: '接续处理',
+    term: '.then / .catch',
+    zh: '接续处理',
+    why: '不用 await 时，可以用 .then 在上一步完成后接着处理，.catch 专门接错误。',
+  },
+  {
+    key: 'function',
+    match: /^\s*(export\s+)?(async\s+)?function\b/,
+    label: '定义函数',
+    term: 'function',
+    zh: '函数',
+    why: '把一段会重复用到的操作起个名字存起来，以后调用这个名字就等于执行那一段。',
+  },
+  {
+    key: 'if',
+    match: /^\s*(else\s+)?if\s*\(/,
+    label: '条件判断',
+    term: 'if',
+    zh: '如果',
+    why: '先判断括号里的条件成不成立，成立就执行下面花括号里的内容。',
+  },
+  {
+    key: 'loop',
+    match: /^\s*(for|while)\s*\(/,
+    label: '循环',
+    term: 'for / while',
+    zh: '循环',
+    why: '让同一段代码按条件重复执行多次，通常用来逐项处理一批数据。',
+  },
+  {
+    key: 'try',
+    match: /^\s*(try\s*\{|catch\b)/,
+    label: '错误兜底',
+    term: 'try / catch',
+    zh: '先试，出错就接住',
+    why: '把可能出错的步骤放进 try，出错就跳到 catch 处理，程序不会直接崩掉。',
+  },
+  {
+    key: 'return',
+    match: /^\s*return\b/,
+    label: '返回结果',
+    term: 'return',
+    zh: '返回',
+    why: '把结果交回给调用这个函数的地方，函数到这里就结束。',
+  },
+  {
+    key: 'import',
+    match: /^\s*import\b/,
+    label: '引入依赖',
+    term: 'import',
+    zh: '导入',
+    why: '从别的文件或第三方包把现成功能引进来，避免自己重写一遍。',
+  },
+  {
+    key: 'env',
+    match: /\bprocess\.env\b/,
+    label: '读环境变量',
+    term: 'process.env',
+    zh: '环境变量',
+    why: '环境变量是运行环境给的配置，常用来放密钥、路径这类不该写死在代码里的值。',
+  },
+]
+
+/**
+ * 一行代码 → 一个通用写法，没有可讲的返回 null。
+ * @returns {{key:string,label:string,term:string,zh:string,why:string}|null}
+ */
+export function teachLine(line) {
+  const trimmed = str(line).trim()
+  if (!trimmed) return null
+  if (/^(\"|\')?$/.test(trimmed)) return null
+  for (const rule of TEACH_RULES) {
+    if (rule.match.test(trimmed)) {
+      return { key: rule.key, label: rule.label, term: rule.term, zh: rule.zh, why: rule.why }
+    }
+  }
+  return null
+}
+
+/**
+ * 整段代码 → 教学信息：一句总述 + 按写法聚合的条目（附出现行号）+ 术语表。
+ * 同一种写法只保留一条，重复出现的行号挂在同一条上。
+ */
+export function teachCode(code, lang) {
+  const lines = str(code).split(/\r?\n/)
+  const shellLike = SHELL_LANGS.test(str(lang).trim())
+  const patterns = []
+  const index = new Map()
+  const terms = []
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]
+    if (shellLike && !/^\s*(?:const|let|var|import|async|await|function|export|if|for|while|try|catch|return|console)\b/.test(line)) {
+      continue
+    }
+    const hit = teachLine(line)
+    if (!hit) continue
+    let pattern = index.get(hit.key)
+    if (!pattern) {
+      pattern = { key: hit.key, label: hit.label, term: hit.term, zh: hit.zh, why: hit.why, lines: [] }
+      index.set(hit.key, pattern)
+      patterns.push(pattern)
+      terms.push({ term: hit.term, zh: hit.zh })
+    }
+    pattern.lines.push(i + 1)
+  }
+  const summary = patterns.length
+    ? '这段代码主要用到了：' + patterns.slice(0, 4).map((p) => p.label).join('、') + '。'
+    : ''
+  return { summary, patterns, terms }
+}
