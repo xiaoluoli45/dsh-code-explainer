@@ -509,7 +509,7 @@ class CodeExplainerRuntime {
       const ai = this.parseAi(text)
       record.ai = ai
       record.aiStatus = 'done'
-      this.aiCache.set(record.hash, ai)
+      this.cacheAi(record.hash, ai)
       this.persist(record)
     } catch (error) {
       record.aiStatus = 'failed'
@@ -538,6 +538,15 @@ class CodeExplainerRuntime {
           this.active -= 1
           this.pump()
         })
+    }
+  }
+
+  cacheAi(hash, ai) {
+    if (!hash || !ai) return
+    this.aiCache.set(hash, ai)
+    if (this.aiCache.size > 500) {
+      const oldest = this.aiCache.keys().next().value
+      if (oldest !== undefined) this.aiCache.delete(oldest)
     }
   }
 
@@ -586,7 +595,7 @@ class CodeExplainerRuntime {
             updatedAt: Number(stored.updatedAt) || Date.now(),
           }
           this.records.set(record.callId, record)
-          if (record.ai && record.hash) this.aiCache.set(record.hash, record.ai)
+          if (record.ai && record.hash) this.cacheAi(record.hash, record.ai)
         } catch {
           /* 单行损坏不影响其它记录 */
         }
