@@ -150,14 +150,14 @@ dsh plugin --profile desktop remove dsh-code-explainer
 
 - `node --check index.js / rules.js / client.js / test/smoke.mjs` 通过。
 - `node test/smoke.mjs` 通过：逐行规则、具体 API 识别（`import()`/`require()`、`fs`、`path`、`process`）、同写法去重、未识别标注、凭据掩码、HTTP、模型补充、哈希缓存、运行中不请模型、无模型降级、落盘脱敏。
-- 代码块 DOM 契约（`.md-code-block` / `[data-code-block-banner]` / `pre > code > span.line` / 复制读 `pre.textContent`）来自本机 DSH `0.2.1-rc.5` 前端产物的实现。
-- **本机 DSH 0.2.1-rc.5 实测**（插件 0.4.0，`run_code` 执行 `const fs = await import("node:fs"); console.log(fs.readdirSync("D:\\project\\demo").slice(0, 3));`）：
+- 代码块 DOM 契约（`.md-code-block` / `[data-code-block-banner]` / `pre > code > span.line` / 复制读 `pre.textContent`）来自 DSH `0.2.1-rc.5` 前端产物的实现。
+- **DSH 0.2.1-rc.5 实测**（插件 0.4.0，`run_code` 执行 `const fs = await import("node:fs"); console.log(fs.readdirSync("D:\\project\\demo").slice(0, 3));`）：
   - 该行行尾注释为「动态加载 文件系统模块 fs，返回模块对象，后面用 fs 调用；node: 前缀表示 Node 内置模块」，不再只讲 `await`/`const`；
   - 同一段里第二次 `import("node:fs")` 标成「（同上）」；`try {` 行标「试着做下面的操作，try/catch（先试，出错就接住）」；
   - 代码块下方直接是输出区，没有「为什么这么写」按钮或面板；
   - 长注释换到下一行，代码本身没有被挤掉；
-  - 点复制按钮后剪贴板得到的是原始代码（10 行），不含任何注释；
-  - 截图：本机证据目录 `evidence/dce-import-line.png`、`evidence/dce-import-zoom.png`。
+  - 点复制按钮后剪贴板得到的是完整原始代码，不含任何注释；
+  - 截图仅用于本地验证，不随仓库发布。
 - 修正过：`ops_bash` 的输入 JSON 与输出共用同一 DOM 结构，已按「输入/输出」标签过滤；面板时代代码块高度被压缩的问题随面板删除一并消失。
 
 **没有验证**（离线测试不能替代）：
@@ -192,4 +192,6 @@ node test/smoke.mjs
 
 ## License
 
-MIT
+MIT © 2026 xiaoluoli45
+
+本项目以 MIT 协议开源，可自由使用、修改和分发，保留版权与许可声明即可。完整条款见 [LICENSE](LICENSE)。
