@@ -203,6 +203,152 @@ function stringValue(line) {
   return match ? match[1] : ''
 }
 
+/* ── 具体 API / 模块识别 ───────────────────────────────────────────── */
+
+const MODULE_LABELS = {
+  fs: '文件系统模块',
+  path: '路径处理模块',
+  os: '系统信息模块',
+  child_process: '运行子进程模块',
+  url: '网址（URL）处理模块',
+  crypto: '加密模块',
+  http: '网络请求模块',
+  https: 'HTTPS 请求模块',
+}
+
+/** node:fs → 文件系统模块 fs */
+function moduleOf(spec) {
+  const raw = str(spec).trim()
+  const name = raw.replace(/^node:/, '').split('/')[0]
+  return { name, label: MODULE_LABELS[name] || '模块 ' + name }
+}
+
+/** 取出这一行里的字符串字面量，按出现顺序返回 */
+function quotedParts(text) {
+  const out = []
+  const pattern = /["'`]([^"'`]*)["'`]/g
+  let match
+  while ((match = pattern.exec(str(text)))) out.push(match[1])
+  return out
+}
+
+function fsActionOf(method) {
+  const name = str(method).toLowerCase()
+  if (/^readfile/.test(name)) return '读取文件内容'
+  if (/^writefile/.test(name)) return '写入文件内容'
+  if (/^appendfile/.test(name)) return '在文件末尾追加内容'
+  if (/^readdir/.test(name)) return '列出目录里的内容'
+  if (/^mkdir/.test(name)) return '新建文件夹'
+  if (/^(rm|unlink|rmdir)/.test(name)) return '删除文件或文件夹'
+  if (/^(copyfile|cp)/.test(name)) return '复制文件'
+  if (/^(rename|mv)/.test(name)) return '移动或重命名文件'
+  if (/^(stat|access|exists)/.test(name)) return '检查文件是否存在或取文件信息'
+  return '操作本地文件'
+}
+
+const PATH_ACTIONS = {
+  join: '把多段路径拼成一个完整路径',
+  resolve: '把相对路径换算成绝对路径',
+  basename: '取路径里的文件名',
+  dirname: '取路径里的目录部分',
+  extname: '取文件扩展名',
+  parse: '把路径拆成目录、文件名和扩展名',
+  relative: '算出两个路径之间的相对位置',
+  normalize: '把路径整理成规范写法',
+}
+
+/**
+ * 识别一行里具体的模块 / API / 参数，返回一句「做什么 → 返回什么 → 为什么」。
+ * 认不出来返回 ''，交给后面的通用规则或模型。
+ */
+function apiNote(line) {
+  const trimmed = str(line).trim()
+  let match
+
+  // const fs = await import("node:fs") / const fs = require("fs")
+  if (
+    (match = trimmed.match(
+      /^(?:const|let|var)\s+(\{[^}]*\}|\w+)\s*=\s*(?:await\s+)?(?:import|require)\s*\(\s*["'`]([^"'`]+)["'`]/,
+    ))
+  ) {
+    const target = match[1]
+    const spec = match[2]
+    const mod = moduleOf(spec)
+    const builtin = /^node:/.test(spec.trim()) ? '；node: 前缀表示 Node 内置模块' : ''
+    if (target.charAt(0) === '{') {
+      const names = target
+        .replace(/[{}]/g, '')
+        .split(',')
+        .map((item) => item.trim().split(':').pop().trim())
+        .filter(Boolean)
+      return '加载 ' + mod.label + ' ' + mod.name + '，取出 ' + names.join('、') + ' 后面直接用' + builtin
+    }
+    return (
+      '动态加载 ' + mod.label + ' ' + mod.name + '，返回模块对象，后面用 ' + target + ' 调用' + builtin
+    )
+  }
+
+  // 单独的 import("...") / require("...")
+  if ((match = trimmed.match(/(?:^|[=(,]\s*)(?:await\s+)?(?:import|require)\s*\(\s*["'`]([^"'`]+)["'`]/))) {
+    const mod = moduleOf(match[1])
+    return '动态加载 ' + mod.label + ' ' + mod.name + '，返回模块对象' + (/^node:/.test(match[1]) ? '；node: 前缀表示 Node 内置模块' : '')
+  }
+
+  // 静态 import：import fs from "node:fs"
+  if (/^import\b/.test(trimmed)) {
+    const spec = quotedParts(trimmed)[0] || ''
+    if (spec) {
+      const mod = moduleOf(spec)
+      return '导入 ' + mod.label + ' ' + mod.name + '，后面直接用它提供的功能'
+    }
+  }
+
+  // fs.readFileSync("a.txt", "utf8") / await fs.promises.readFile(...)
+  if ((match = trimmed.match(/(?:^|[=(,]\s*)(?:await\s+)?(?:fs\.promises|fsp|fs)\.(\w+)\s*\(/))) {
+    const method = match[1]
+    const args = quotedParts(trimmed)
+    const file = args[0] || ''
+    const option = args[1] || ''
+    let note = '用 fs（文件系统模块）' + fsActionOf(method)
+    if (file) note += ' ' + clip(file, 32)
+    if (/^(utf-?8|ascii|latin1|base64|hex)$/i.test(option)) note += '，' + option + ' 表示按文本编码读写'
+    else if (option) note += '，第二个字符串是选项'
+    if (/Sync$/.test(method)) note += '（Sync：做完才继续）'
+    return note
+  }
+
+  // process.env.X / process.cwd() / process.argv
+  if ((match = trimmed.match(/process\.env\.(\w+)/))) return '用 process.env（环境变量）读取 ' + match[1] + ' 的值'
+  if (/process\.env\b/.test(trimmed)) return '用 process.env（环境变量）读取运行环境给的配置'
+  if (/process\.cwd\s*\(/.test(trimmed)) return '用 process.cwd() 取当前工作目录的完整路径'
+  if (/process\.argv\b/.test(trimmed)) return '用 process.argv 取命令行传进来的参数'
+  if (/process\.exit\s*\(/.test(trimmed)) return '用 process.exit() 结束程序并交回退出码'
+  if (/process\.platform\b/.test(trimmed)) return '用 process.platform 取当前操作系统类型'
+  if (/\bprocess\./.test(trimmed)) return '调用 Node 进程相关的功能'
+
+  // path.join(...) 等
+  if ((match = trimmed.match(/\bpath\.(join|resolve|basename|dirname|extname|parse|relative|normalize)\s*\(/))) {
+    const action = PATH_ACTIONS[match[1]]
+    const args = quotedParts(trimmed)
+    const extra = []
+    if (/__dirname/.test(trimmed)) extra.push('__dirname（当前文件所在目录）')
+    if (/__filename/.test(trimmed)) extra.push('__filename（当前文件完整路径）')
+    return (
+      '用 path（路径处理模块）' +
+      action +
+      (args.length > 0 ? '：' + clip(args.join(' / '), 40) : '') +
+      (extra.length > 0 ? '；' + extra.join('、') : '')
+    )
+  }
+
+  // fetch("https://…")
+  if ((match = trimmed.match(/\bfetch\s*\(\s*["'`]([^"'`]+)["'`]/))) {
+    return '联网请求 ' + clip(match[1], 48) + ' 并取回数据（通常要等结果）'
+  }
+
+  return ''
+}
+
 /**
  * 一行代码 → 一句说明；没有实际动作（空行、纯括号、已有注释）返回 ''。
  */
@@ -216,6 +362,16 @@ export function explainCodeLine(line) {
   if (/^\}\s*\)?\s*;?$/.test(trimmed)) return ''
 
   let match
+
+  // console.log(具体表达式)：外层打印 + 里层表达式一起讲
+  const wrapped = trimmed.match(/^console\.log\((.+)\)\s*;?$/)
+  if (wrapped) {
+    const inner = apiNote(wrapped[1])
+    if (inner) return '先' + inner + '，再把结果打印出来'
+  }
+
+  const specific = apiNote(trimmed)
+  if (specific) return specific
 
   if (/^console\.log\(/.test(trimmed)) return '把结果打印出来'
   if (/^console\.(error|warn)\(/.test(trimmed)) return '打印错误提示'
@@ -287,6 +443,38 @@ export function explainCodeLines(code, lang) {
  *   why   —— 为什么这么写 / 这是什么通用写法
  */
 const TEACH_RULES = [
+  {
+    key: 'dynamic-import',
+    match: /(?:^|[=(,]\s*)(?:await\s+)?(?:import|require)\s*\(\s*["'`]/,
+    label: '运行时加载模块',
+    term: 'import() / require()',
+    zh: '运行时加载模块',
+    why: '和文件顶部写死的 import 不同，这种写法在代码执行到这里时才去加载模块，返回模块对象。',
+  },
+  {
+    key: 'fs',
+    match: /(?:^|[=(,]\s*)(?:await\s+)?(?:fs\.promises|fsp|fs)\.\w+\s*\(/,
+    label: '读写本地文件',
+    term: 'fs',
+    zh: '文件系统模块',
+    why: 'fs 是 Node.js 读写文件的模块；带 Sync 的方法表示读完或写完才继续。',
+  },
+  {
+    key: 'process',
+    match: /\bprocess\.(env|cwd|argv|exit|platform|version)\b/,
+    label: '读取进程信息',
+    term: 'process',
+    zh: 'Node 当前进程',
+    why: 'process 代表正在运行的这个 Node 程序，可以读环境变量、工作目录和启动参数。',
+  },
+  {
+    key: 'path',
+    match: /\bpath\.(join|resolve|basename|dirname|extname|parse|relative|normalize)\s*\(/,
+    label: '处理文件路径',
+    term: 'path',
+    zh: '路径处理模块',
+    why: 'path 专门拼路径、拆路径，避免手写斜杠在 Windows 和 macOS 上不兼容。',
+  },
   {
     key: 'async',
     match: /^\s*(export\s+)?async\s+function\b|\basync\s*\(/,
@@ -465,34 +653,57 @@ export function teachLine(line) {
   return null
 }
 
+/* ── 行尾注释：动作 + 半句为什么 ───────────────────────────────────── */
+
 /**
- * 整段代码 → 教学信息：一句总述 + 按写法聚合的条目（附出现行号）+ 术语表。
- * 同一种写法只保留一条，重复出现的行号挂在同一条上。
+ * 每种通用写法只补半句「为什么 / 术语对照」，直接拼在行尾动作说明后面。
+ * 不放独立面板；同一写法只在第一次出现的那行解释。
  */
-export function teachCode(code, lang) {
+const TEACH_HINTS = {
+  async: 'async（异步函数）标记后里面才能用 await',
+  await: 'await（等待异步完成）表示等这步跑完再继续',
+  'tool-call': 'tools（工具集）后面跟工具名、括号里传参数',
+  timeoutMs: 'timeoutMs（超时毫秒）防止命令卡死',
+  command: 'command（命令，必填）其余参数可选',
+  options: '这是可选参数，按需给',
+  'console.log': 'console.log（控制台打印）最直接查看结果',
+  json: 'JSON（通用数据格式）parse 变对象、stringify 变文字',
+  arrow: '=>（箭头函数）给排序/筛选传一段规则',
+  const: 'const（声明后不再改指）把结果留着后面用',
+  https: 'fetch（发请求）联网取回数据',
+  fs: '',
+  process: '',
+  path: '',
+  promise: '.then（接续处理）上一步完成后再接着做',
+  function: 'function（函数）把一段操作起名存起来',
+  if: 'if（如果）先判断条件再决定做不做',
+  loop: 'for/while（循环）让同一段代码重复执行',
+  try: 'try/catch（先试，出错就接住）',
+  return: 'return（返回）把结果交回调用处',
+  import: 'import（导入）把现成功能引进来',
+  env: 'process.env（环境变量）读运行环境给的配置',
+}
+
+/**
+ * 把「为什么这么写」压进行尾注释，不再单独出面板。
+ * 没有动作说明的行保持空字符串，交给模型补；同一写法只在第一次解释，后续标「（同上）」。
+ * @param {string} code
+ * @param {string} [lang]
+ * @param {string[]} notes explainCodeLines 的结果
+ * @returns {string[]}
+ */
+export function enrichLineNotes(code, lang, notes) {
   const lines = str(code).split(/\r?\n/)
-  const shellLike = SHELL_LANGS.test(str(lang).trim())
-  const patterns = []
-  const index = new Map()
-  const terms = []
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i]
-    if (shellLike && !/^\s*(?:const|let|var|import|async|await|function|export|if|for|while|try|catch|return|console)\b/.test(line)) {
-      continue
-    }
-    const hit = teachLine(line)
-    if (!hit) continue
-    let pattern = index.get(hit.key)
-    if (!pattern) {
-      pattern = { key: hit.key, label: hit.label, term: hit.term, zh: hit.zh, why: hit.why, lines: [] }
-      index.set(hit.key, pattern)
-      patterns.push(pattern)
-      terms.push({ term: hit.term, zh: hit.zh })
-    }
-    pattern.lines.push(i + 1)
-  }
-  const summary = patterns.length
-    ? '这段代码主要用到了：' + patterns.slice(0, 4).map((p) => p.label).join('、') + '。'
-    : ''
-  return { summary, patterns, terms }
+  const seen = new Set()
+  return (Array.isArray(notes) ? notes : []).map((raw, index) => {
+    const note = str(raw)
+    if (!note) return ''
+    const hit = teachLine(lines[index])
+    if (!hit) return note
+    if (seen.has(hit.key)) return clip(note + '（同上）', 60)
+    seen.add(hit.key)
+    const hint = TEACH_HINTS[hit.key]
+    // 说明本身已经很长时不再追加通用写法，避免把具体表达式挤出屏幕
+    return hint && note.length < 40 ? clip(note + '，' + hint, 96) : note
+  })
 }

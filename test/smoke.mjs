@@ -11,7 +11,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
-import { explainCodeLines, explainCommandLine, redact, teachCode, teachLine } from '../rules.js'
+import { enrichLineNotes, explainCodeLines, explainCommandLine, redact, teachLine } from '../rules.js'
 
 const API = '/dsh-code-explainer/api'
 // 运行时拼出的假凭据：只用于验证掩码，不写入仓库中的任何真实 Key
@@ -138,39 +138,57 @@ assert.equal(notes[4], '')
 assert.equal(notes[5], '')
 assert.equal(notes[6], '把结果打印出来')
 
+// 具体表达式：模块、返回值、参数都要讲到，而不是只报语法名
+const dynamicImport = explainCodeLines('const fs = await import("node:fs");', 'js')[0]
+assert.ok(dynamicImport.includes('文件系统模块'))
+assert.ok(dynamicImport.includes('返回模块对象'))
+assert.ok(dynamicImport.includes('node: 前缀'))
+const requireNote = explainCodeLines("const { readFile } = require('node:fs')", 'js')[0]
+assert.ok(requireNote.includes('文件系统模块'))
+assert.ok(requireNote.includes('readFile'))
+const fsNote = explainCodeLines('fs.readFileSync("config.json", "utf8");', 'js')[0]
+assert.ok(fsNote.includes('config.json'))
+assert.ok(fsNote.includes('utf8'))
+const fsPromise = explainCodeLines('const text = await fs.promises.readFile("a.txt", "utf8")', 'js')[0]
+assert.ok(fsPromise.includes('读取文件内容'))
+assert.ok(fsPromise.includes('a.txt'))
+assert.ok(explainCodeLines('const home = process.env.HOME', 'js')[0].includes('HOME'))
+assert.ok(explainCodeLines('const p = path.join("a", "b.txt")', 'js')[0].includes('b.txt'))
+assert.ok(explainCodeLines('const p = path.join(__dirname, "a.txt")', 'js')[0].includes('__dirname'))
+
 const redacted = redact('curl -H "Authorization: Bearer ' + FAKE_KEY + '" https://example.com')
 assert.ok(!redacted.includes(FAKE_KEY))
 assert.ok(redacted.includes('***'))
 
-// 教学层：按行识别通用写法，同一种写法聚合成一条并记下行号
+// 行尾注释：动作 + 半句为什么；同一写法只在第一次解释
 assert.equal(teachLine('});'), null)
 assert.equal(teachLine('const x = await foo()').key, 'await')
-const learn = teachCode(SAMPLE, 'typescript')
-assert.ok(learn.summary.includes('等异步结果'))
-assert.equal(learn.patterns[0].key, 'await')
-assert.deepEqual(learn.patterns[0].lines, [1])
-assert.deepEqual(learn.patterns.find((p) => p.key === 'timeoutMs').lines, [4])
-assert.deepEqual(learn.patterns.find((p) => p.key === 'command').lines, [2])
-assert.ok(learn.patterns.find((p) => p.key === 'arrow').why.includes('简写'))
-assert.ok(learn.terms.some((t) => t.term === 'timeoutMs'))
+
+const enriched = enrichLineNotes(SAMPLE, 'typescript', notes)
+assert.ok(enriched[0].includes('调用命令行工具，把结果存起来'))
+assert.ok(enriched[0].includes('await（等待异步完成）'))
+assert.ok(enriched[1].includes('列出文件夹里有哪些文件'))
+assert.ok(enriched[1].includes('command（命令，必填）'))
+assert.ok(enriched[2].includes('给这次操作加一句说明'))
+assert.ok(enriched[2].includes('可选参数'))
+assert.ok(enriched[3].includes('最多等 60 秒'))
+assert.ok(enriched[3].includes('timeoutMs（超时毫秒）'))
+assert.equal(enriched[4], '')
+assert.equal(enriched[5], '')
+
+const repeated = enrichLineNotes('const a = await f()\nconst b = await g()', 'js', [
+  '等第一步做完',
+  '等第二步做完',
+])
+assert.ok(repeated[0].includes('await（等待异步完成）'))
+assert.ok(!repeated[0].includes('同上'))
+assert.ok(repeated[1].includes('（同上）'))
+assert.ok(!repeated[1].includes('等待异步完成'))
 
 /* ── 2. HTTP + AI 补充 ──────────────────────────────────────────────── */
 
 const answer = JSON.stringify({
   notes: { 6: '把这几项按大小排好顺序' },
-  learn: {
-    summary: '这段代码调用命令行工具，把结果排序后打印。',
-    patterns: [
-      {
-        key: 'sort',
-        label: '排序',
-        term: 'sort',
-        zh: '按规则排序',
-        why: '把一组数据按指定规则排好顺序，省得自己写循环。',
-      },
-    ],
-    terms: [{ term: 'sort', zh: '按规则排序' }],
-  },
 })
 const llm = fakeLlm(answer)
 const runtime = createRuntime({ llm })
@@ -183,11 +201,10 @@ const first = await call(runtime.route(), {
 assert.equal(first.statusCode, 200)
 assert.equal(first.json.ok, true)
 assert.equal(first.json.aiStatus, 'running')
-assert.equal(first.json.notes[0], '调用命令行工具，把结果存起来')
+assert.ok(first.json.notes[0].includes('调用命令行工具，把结果存起来'))
+assert.ok(first.json.notes[0].includes('await（等待异步完成）'))
 assert.equal(first.json.notes[5], '')
 assert.ok(first.json.hash)
-assert.equal(first.json.learn.patterns[0].key, 'await')
-assert.ok(first.json.learn.patterns.some((p) => p.key === 'timeoutMs'))
 
 // 等 AI 队列跑完
 await new Promise((resolve) => setTimeout(resolve, 300))
@@ -195,11 +212,6 @@ const second = await call(runtime.route(), { url: API + '/line-notes?hash=' + fi
 assert.equal(second.statusCode, 200)
 assert.equal(second.json.aiStatus, 'done')
 assert.equal(second.json.notes[5], '把这几项按大小排好顺序')
-assert.equal(second.json.learn.summary, '这段代码调用命令行工具，把结果排序后打印。')
-// 规则认识的写法保留，模型补的写法追加在后面，术语不重复
-assert.equal(second.json.learn.patterns[0].key, 'await')
-assert.ok(second.json.learn.patterns.some((p) => p.key === 'sort'))
-assert.equal(second.json.learn.terms.filter((t) => t.term === 'await').length, 1)
 assert.equal(llm.calls.length, 1)
 assert.equal(llm.calls[0].provider, 'p1')
 assert.equal(llm.calls[0].model, 'm1')
@@ -240,7 +252,7 @@ const quick = await call(deferred.route(), {
   body: { code: SAMPLE, lang: 'typescript', ai: false },
 })
 assert.equal(quick.json.aiStatus, 'off')
-assert.equal(quick.json.notes[0], '调用命令行工具，把结果存起来')
+assert.ok(quick.json.notes[0].includes('调用命令行工具，把结果存起来'))
 await new Promise((resolve) => setTimeout(resolve, 250))
 assert.equal(deferredLlm.calls.length, 0)
 
@@ -269,10 +281,12 @@ const fallback = await call(offline.route(), {
   body: { code: SAMPLE, lang: 'typescript' },
 })
 assert.equal(fallback.statusCode, 200)
-assert.equal(fallback.json.notes[0], '调用命令行工具，把结果存起来')
+assert.ok(fallback.json.notes[0].includes('调用命令行工具，把结果存起来'))
 await new Promise((resolve) => setTimeout(resolve, 200))
 const offlineState = await call(offline.route(), { url: API + '/line-notes?hash=' + fallback.json.hash })
 assert.equal(offlineState.json.aiStatus, 'failed')
+// 规则认不出、模型也没补上的调用要明确标「未识别」，不能默默跳过
+assert.ok(offlineState.json.notes[5].includes('未识别'))
 
 const offConfig = createRuntime({ llm: fakeLlm(answer), config: { llm: 'off' } })
 const offResult = await call(offConfig.route(), {
