@@ -1,0 +1,20 @@
+# dsh-code-explainer 的 profile 层补丁
+#
+# package.json 的 dsh.bundle.patch 指向本文件。宿主会把它当 profile 层插件挂载。
+# entry 的 name 必须是本包内的相对路径，不能写裸包名。
+#
+# 可配置项（全部可省略，省略即用默认值）：
+#   enabled          true          总开关
+#   llm              onExpand      首次展开卡片时才请求 AI；auto 立即请求；off 只用规则
+#   provider/model   （空）         显式指定辅助调用模型；留空则复用当前会话模型路由
+#   maxInputChars    6000          发给模型的输入上限
+#   maxOutputTokens  500           模型输出上限
+#   timeoutMs        20000         AI 调用超时
+#   concurrency      2             自动模式下并发上限
+#   tools            [...]         需要解释的工具名，默认见 rules.js 的 DEFAULT_TOOLS
+
+- insert:
+    - id: dsh-code-explainer
+      name: './index.js'
+      config:
+        llm: onExpand
