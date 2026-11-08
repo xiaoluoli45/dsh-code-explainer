@@ -116,7 +116,7 @@ function fakeLlm(answer) {
 
 const SAMPLE = [
   "const r = await tools.ops_bash({",
-  '  command: "Get-ChildItem -LiteralPath \'D:\\\\dsh-plugin\\\\code-explainer\'",',
+  '  command: "Get-ChildItem -LiteralPath \'D:\\\\project\\\\demo\'",',
   '  description: "List code-explainer directory contents",',
   '  timeoutMs: 60000',
   '});',

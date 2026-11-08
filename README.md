@@ -151,7 +151,7 @@ dsh plugin --profile desktop remove dsh-code-explainer
 - `node --check index.js / rules.js / client.js / test/smoke.mjs` 通过。
 - `node test/smoke.mjs` 通过：逐行规则、具体 API 识别（`import()`/`require()`、`fs`、`path`、`process`）、同写法去重、未识别标注、凭据掩码、HTTP、模型补充、哈希缓存、运行中不请模型、无模型降级、落盘脱敏。
 - 代码块 DOM 契约（`.md-code-block` / `[data-code-block-banner]` / `pre > code > span.line` / 复制读 `pre.textContent`）来自本机 DSH `0.2.1-rc.5` 前端产物的实现。
-- **本机 DSH 0.2.1-rc.5 实测**（插件 0.4.0，`run_code` 执行 `const fs = await import("node:fs"); console.log(fs.readdirSync("D:\\dsh-plugin\\code-explainer").slice(0, 3));`）：
+- **本机 DSH 0.2.1-rc.5 实测**（插件 0.4.0，`run_code` 执行 `const fs = await import("node:fs"); console.log(fs.readdirSync("D:\\project\\demo").slice(0, 3));`）：
   - 该行行尾注释为「动态加载 文件系统模块 fs，返回模块对象，后面用 fs 调用；node: 前缀表示 Node 内置模块」，不再只讲 `await`/`const`；
   - 同一段里第二次 `import("node:fs")` 标成「（同上）」；`try {` 行标「试着做下面的操作，try/catch（先试，出错就接住）」；
   - 代码块下方直接是输出区，没有「为什么这么写」按钮或面板；
