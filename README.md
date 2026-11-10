@@ -114,7 +114,8 @@ dsh plugin --profile desktop remove dsh-code-explainer
 1. 在 `[data-chat-call-id]` 里的 `.md-code-block` 上找到**输入**代码块，取出每行文本（`pre > code > span.line`）。
 2. `POST /line-notes` 拿逐行说明；对每个 `.line` 只写 `data-dce-note` 属性。
 3. 说明由 CSS 伪元素渲染：`content: "  // " attr(data-dce-note)`。伪元素不进入 `textContent`，所以复制按钮（读 `pre.textContent`）拿到的仍是原代码，选中也不会带注释。长行按可见宽度加 `data-dce-long="1"`，注释换到下一行。
-4. **输出区**（`[class*="ioText"]`）先分类：代码 → 去掉 `1: ` 行号后按行说明（蓝色 `→`）；JSON/日志/清单/普通文本 → 块首插 `.dce-io-head` 总述，关键行写 `data-dce-onote`。按行拆分时只用 `<span class="dce-ol">` 保留原文字与换行，说明仍走伪元素。
+4. **输出区**（`[class*="ioText"]`）先分类：代码 → 去掉 `1: ` 行号后按行说明（蓝色 `→`）；JSON/日志/清单/普通文本 → 输出块上方插一行 `.dce-io-head` 总述，关键行写 `data-dce-onote`。按行拆分时只用 `<span class="dce-ol">` 保留原文字与换行，说明仍走伪元素。
+   - 总述**插在 ioSection 外侧**：作为 `ioCard` 的子节点、紧挨在输出那个 `ioSection` 前面。宿主的 `ioSection` 是 `display:grid; grid-template-columns:max-content 1fr` 的「标签 + 正文」两格，**往里多塞一个子节点**，自动排布就会把 `ioText` 挤到第二行第一列，正文被甩到下面、上面留一片空白。`test/output-card.mjs` 就是守这条结构的回归测试。
 5. `MutationObserver` 观察会话 DOM；React 重渲染后自动补回属性。每 3 秒还会兜底扫一次。
 6. 开关按钮插在代码块自己的标题栏里（`[data-code-block-banner]`），不额外加卡片。
 7. 工具卡还在运行时（`data-state="running"`）只取规则结果，等状态结束再请模型补，避免半截代码反复调用模型。
@@ -150,6 +151,7 @@ dsh plugin --profile desktop remove dsh-code-explainer
 
 - `node --check index.js / rules.js / client.js / test/smoke.mjs` 通过。
 - `node test/smoke.mjs` 通过：逐行规则、具体 API 识别（`import()`/`require()`、`fs`、`path`、`process`）、同写法去重、未识别标注、凭据掩码、HTTP、模型补充、哈希缓存、运行中不请模型、无模型降级、落盘脱敏。
+- `node test/output-card.mjs` 通过：用最小 DOM 桩复刻宿主的 ioCard > ioSection >（ioLabel + ioText）结构，断言总述挂在外侧、ioSection 始终只有两个子节点、拆行不改原文。把旧实现塞回 ioSection 里跑，这条测试立刻红。
 - 代码块 DOM 契约（`.md-code-block` / `[data-code-block-banner]` / `pre > code > span.line` / 复制读 `pre.textContent`）来自 DSH `0.2.1-rc.5` 前端产物的实现。
 - **DSH 0.2.1-rc.5 实测**（插件 0.4.0，`run_code` 执行 `const fs = await import("node:fs"); console.log(fs.readdirSync("D:\\project\\demo").slice(0, 3));`）：
   - 该行行尾注释为「动态加载 文件系统模块 fs，返回模块对象，后面用 fs 调用；node: 前缀表示 Node 内置模块」，不再只讲 `await`/`const`；
@@ -159,6 +161,7 @@ dsh plugin --profile desktop remove dsh-code-explainer
   - 点复制按钮后剪贴板得到的是完整原始代码，不含任何注释；
   - 截图仅用于本地验证，不随仓库发布。
 - 修正过：`ops_bash` 的输入 JSON 与输出共用同一 DOM 结构，已按「输入/输出」标签过滤；面板时代代码块高度被压缩的问题随面板删除一并消失。
+- 修正过（0.4.1）：输出区的总述原本插进 `ioSection` 内部，等于给两列 grid 加了第三个子节点，正文被挤到下一行、上面留一大片空白。现在改成插在 `ioSection` 外侧，并补了 `test/output-card.mjs`。
 
 **没有验证**（离线测试不能替代）：
 
@@ -168,6 +171,7 @@ dsh plugin --profile desktop remove dsh-code-explainer
 ## 已知边界
 
 - 依赖宿主代码块的 DOM 契约（`span.line`、`data-code-block-banner`）；DSH 前端大改时需要同步改选择器。
+- 输出区版式依赖宿主 `ioSection` 是「两列 grid」这一事实：插件只往它外面加节点，绝不插进去；宿主若改成 flex，`test/output-card.mjs` 需要同步。
 - 多行字符串里的行也会被当作独立代码行判断，可能出现不准确的注释。
 - 长行注释是否换行，按代码块可见宽度和字符数估算（约 7.2px/字符）；不同字号或等比缩放时可能提前/延后换行。
 - 一行里有多个表达式嵌套时只讲外层：如 `fs.readFileSync(path.join(__dirname, "a.json"), "utf8")`，可能把 `path.join` 里的字符串误当成文件路径和编码选项。

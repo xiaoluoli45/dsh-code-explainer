@@ -70,10 +70,13 @@ window.__ModuleLoader__.load({
       ':root.dce-notes-on .dce-ol[data-dce-long="1"][data-dce-onote]::after{',
       'content:"→ " attr(data-dce-onote);display:block;margin-top:1px;padding-left:2ch;',
       'white-space:normal;line-height:1.45}',
-      // 输出块首的一句总述：关掉开关时整块隐藏，回到纯代码视图
+      // 输出块首的一句总述：关掉开关时整块隐藏，回到纯代码视图。
+      // 挂在 ioCard（flex 纵向）上、作为 ioSection 的前一个兄弟节点，绝不作为 ioSection 的子节点：
+      // 宿主用 grid-template-columns:max-content 1fr 摆「标签 + 正文」两格，
+      // 多塞一个子节点会把正文挤到第二行第一列，输出区就变成上面一片空白、内容甩到下面。
       '.dce-io-head{display:none;font-size:12px;line-height:18px;',
       'color:var(--dsw-alias-label-secondary,#5d7fb5)}',
-      ':root.dce-notes-on .dce-io-head{display:block;margin:2px 0 4px;padding:3px 8px;',
+      ':root.dce-notes-on .dce-io-head{display:block;margin:6px 12px 2px;padding:2px 8px;',
       'border-left:2px solid rgba(107,147,214,.55);background:rgba(107,147,214,.08);border-radius:3px}',
       // 顶部开关：小而低调，插在语言标签/复制按钮那一行
       '.dce-toggle{appearance:none;border:0;border-radius:4px;background:transparent;',
@@ -420,17 +423,48 @@ window.__ModuleLoader__.load({
       return tool === 'read' ? '这段输出是读到的文件内容' : '这段输出是工具返回的文字'
     }
 
+    function isGridBox(el) {
+      var display = ''
+      try {
+        display = String(window.getComputedStyle(el).display || '')
+      } catch {
+        display = ''
+      }
+      if (display) return display.indexOf('grid') >= 0
+      return /\bioSection\b/.test(String(el.className || ''))
+    }
+
+    /**
+     * 输出块首的一句总述，必须插成 ioSection 的兄弟节点，不能插进它里面。
+     *
+     * 宿主的结构是：
+     *   div.ioCard（flex 纵向）
+     *     div.ioSection（grid，grid-template-columns:max-content 1fr）
+     *       span.ioLabel「输出」 + span.ioText
+     * ioSection 多出一个子节点，grid 自动排布就把 ioText 挤到第二行第一列：
+     * 正文被甩到下面、上面留一片空白（v0.4.0 的线上 bug）。所以往上找到第一个
+     * 不是 grid 的容器，把总述插成「那个 grid 块」的前一个兄弟。
+     */
     function ensureIoHead(card, textEl, text) {
-      var section = textEl.parentElement || card
-      var existing = section.querySelector('.dce-io-head')
+      var anchor = textEl.parentElement || card
+      var host = anchor ? anchor.parentElement : null
+      var guard = 0
+      while (host && guard < 4 && isGridBox(host)) {
+        anchor = host
+        host = host.parentElement
+        guard += 1
+      }
+      if (!host || !anchor) return
+      var existing = host.querySelector('.dce-io-head')
       if (existing) {
         if (existing.textContent !== text) existing.textContent = text
+        if (existing.nextSibling !== anchor) host.insertBefore(existing, anchor)
         return
       }
       var head = document.createElement('div')
       head.className = 'dce-io-head'
       head.textContent = text
-      section.insertBefore(head, textEl)
+      host.insertBefore(head, anchor)
     }
 
     function wrapLines(textEl) {
