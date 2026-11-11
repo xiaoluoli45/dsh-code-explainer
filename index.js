@@ -19,7 +19,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { enrichLineNotes, explainCodeLines, redact } from './rules.js'
+import { enrichLineNotes, explainCodeLines, needsNote, redact } from './rules.js'
 
 export const name = 'dsh-code-explainer'
 
@@ -27,7 +27,7 @@ export const name = 'dsh-code-explainer'
 export const inject = ['webServer']
 
 const API_PATH = '/dsh-code-explainer/api'
-const PLUGIN_VERSION = '0.4.3'
+const PLUGIN_VERSION = '0.4.4'
 const MAX_BODY = 256 * 1024
 const MAX_CODE_CHARS = 20000
 const MAX_AI_LINES = 120
@@ -126,18 +126,6 @@ async function readJsonBody(req) {
   } catch {
     throw Object.assign(new Error('BODY_NOT_JSON'), { code: 'BODY_NOT_JSON' })
   }
-}
-
-/** 这一行是否值得解释：空行、纯括号、纯注释跳过 */
-function needsNote(line) {
-  const trimmed = str(line).trim()
-  if (!trimmed) return false
-  if (/^(\/\/|#|\/\*|\*|\*\/)/.test(trimmed)) return false
-  if (/^[(){}\[\];,]+$/.test(trimmed)) return false
-  if (/^\}\s*\)?\s*;?$/.test(trimmed)) return false
-  // 读取结果外面包的工具标记（<path>、<content> 之类）不需要逐行解释
-  if (/^<\/?[a-z][^>]*>$/i.test(trimmed)) return false
-  return true
 }
 
 const SYSTEM_PROMPT = [

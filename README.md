@@ -153,6 +153,7 @@ dsh plugin --profile desktop remove dsh-code-explainer
 - `node --check index.js / rules.js / client.js / test/smoke.mjs` 通过。
 - `node test/smoke.mjs` 通过：逐行规则、具体 API 识别（`import()`/`require()`、`fs`、`path`、`process`）、同写法去重、未识别标注、凭据掩码、HTTP、模型补充、哈希缓存、运行中不请模型、无模型降级、落盘脱敏。
 - `node test/output-card.mjs` 通过：用最小 DOM 桩复刻宿主的 ioCard > ioSection >（ioLabel + ioText）结构，断言总述挂在外侧、ioSection 始终只有两个子节点、拆行不改原文。把旧实现塞回 ioSection 里跑，这条测试立刻红。
+- `node test/teach.mjs` 通过：教学层能补进动作说明为空的行、已有动作说明的行逐字不变、泛泛写法不硬填、同一写法跨分支只讲一次、注释行不补。它还钉着 `TEACH_HINTS` 的表级不变量（每条要么为空、要么达到 `MIN_TEACH_HINT`）。
 - `node test/powershell.mjs` 通过：无标签的 PowerShell 代码按 shell 规则解释（`$ErrorActionPreference` 赋值、`Start-Sleep`、`New-Object`、`Get-ChildItem | Where-Object`、`Out-File` 都给具体说明），JS 的赋值/减法/按位或不会被误判。
 - 代码块 DOM 契约（`.md-code-block` / `[data-code-block-banner]` / `pre > code > span.line` / 复制读 `pre.textContent`）来自 DSH `0.2.1-rc.5` 前端产物的实现。
 - **DSH 0.2.1-rc.5 实测**（插件 0.4.0，`run_code` 执行 `const fs = await import("node:fs"); console.log(fs.readdirSync("D:\\project\\demo").slice(0, 3));`）：
@@ -163,7 +164,9 @@ dsh plugin --profile desktop remove dsh-code-explainer
   - 点复制按钮后剪贴板得到的是完整原始代码，不含任何注释；
   - 截图仅用于本地验证，不随仓库发布。
 - 修正过：`ops_bash` 的输入 JSON 与输出共用同一 DOM 结构，已按「输入/输出」标签过滤；面板时代代码块高度被压缩的问题随面板删除一并消失。
-- 修正过（0.4.3）：教学层的「为什么」原本只能追加在已有动作说明的行后面——`enrichLineNotes` 先判断「说明为空就整行返回空串」，空说明行的教学命中被直接丢掉（`foo(async () => {})` 就是这种形状）。现在空说明行只要教学说明够具体（长度 ≥ 8，`fs` / `process` / `path` 这类没有具体解释的写法不算）就改用教学说明当行尾注释，同一写法只讲一次；已有动作说明的行逐字不变。实测同一批会话样本 876 行，有说明的行 11.30% → 11.87%，已有说明改动的行数为 0。
+- 修正过（0.4.4）：0.4.3 的判定顺序留了两个尾巴——空说明行讲过的写法，后面的说明行又会追加一遍（同一写法讲两次）；空说明分支没有「值得解释」的门禁，注释行和 JSDoc 也被补上教学说明。现在 `needsNote` 从宿主半身搬进 `rules.js` 共用（单一来源），空分支先过这道门禁；说明行遇到空行已经讲过的写法不再追加。另外修掉一处旧账：没有具体解释可追加的写法（`fs` / `process` / `path`）过去也会被记账，导致同写法第二次出现时被错标「（同上）」。
+  复核口径——仓库自身 7 个源文件 2450 个非空行：新增说明 15 行；既有说明有 69 行发生变化，其中 57 行是去掉错标的「（同上）」、9 行是不再重复追加已讲过的教学半句、3 行是少了追加后不再被截断（露出更完整的原说明）；动作说明本身（`explainCodeLines` 的输出）一处未改。会话样本 876 行：新增 5 行、去掉重复半句 2 行。
+- 修正过（0.4.3）：教学层的「为什么」原本只能追加在已有动作说明的行后面——`enrichLineNotes` 先判断「说明为空就整行返回空串」，空说明行的教学命中被直接丢掉（`foo(async () => {})` 就是这种形状）。现在空说明行只要教学说明够具体（长度 ≥ 8，`fs` / `process` / `path` 这类没有具体解释的写法不算）就改用教学说明当行尾注释，同一写法只讲一次；已有动作说明的行保持原样。实测同一批会话样本 876 行，有说明的行 11.30% → 11.87%（这条「逐字不变」说得太满，0.4.4 修掉了两个尾巴）。
 - 修正过（0.4.2）：工具卡的代码块几乎都没有 `lang` 标签，PowerShell 语句一律按 JS 规则处理、一句都判不出（#4 采样 1630 行里具体说明只有 5.6%）。现在标签缺席时按内容判方言。实测同一批样本（25 个最大的会话记录、15 个含 PowerShell 特征的代码块、378 行），PowerShell 行有说明的比例从 6.6%（25 行）升到 20.6%（78 行）。
 - 修正过（0.4.1）：输出区的总述原本插进 `ioSection` 内部，等于给两列 grid 加了第三个子节点，正文被挤到下一行、上面留一大片空白。现在改成插在 `ioSection` 外侧，并补了 `test/output-card.mjs`。
 
@@ -197,6 +200,7 @@ node --check client.js
 node test/smoke.mjs
 node test/output-card.mjs
 node test/powershell.mjs
+node test/teach.mjs
 ```
 
 冒烟测试使用临时目录（`DSH_CODE_EXPLAINER_DIR`），不会写入真实的 `~/.dsh` 数据。

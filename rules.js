@@ -17,6 +17,21 @@ function clip(text, max) {
   return value.slice(0, max) + '…'
 }
 
+/**
+ * 这一行是否值得解释：空行、纯括号、纯注释跳过。
+ * 富化层与宿主半身的「哪些行要问模型」共用同一判据，避免补上 comment / JSDoc 的教学说明。
+ */
+export function needsNote(line) {
+  const trimmed = str(line).trim()
+  if (!trimmed) return false
+  if (/^(\/\/|#|\/\*|\*|\*\/)/.test(trimmed)) return false
+  if (/^[(){}\[\];,]+$/.test(trimmed)) return false
+  if (/^\}\s*\)?\s*;?$/.test(trimmed)) return false
+  // 读取结果外面包的工具标记（<path>、<content> 之类）不需要逐行解释
+  if (/^<\/?[a-z][^>]*>$/i.test(trimmed)) return false
+  return true
+}
+
 /* ── 凭据掩码 ───────────────────────────────────────────────────────── */
 
 const SECRET_PATTERNS = [
@@ -745,7 +760,8 @@ export function teachLine(line) {
  * 每种通用写法只补半句「为什么 / 术语对照」，直接拼在行尾动作说明后面。
  * 不放独立面板；同一写法只在第一次出现的那行解释。
  */
-const TEACH_HINTS = {
+/** 每条教学说明的文案；导出是为了让「要么为空、要么够具体」成为可断言的不变量。 */
+export const TEACH_HINTS = {
   async: 'async（异步函数）标记后里面才能用 await',
   await: 'await（等待异步完成）表示等这步跑完再继续',
   'tool-call': 'tools（工具集）后面跟工具名、括号里传参数',
@@ -772,9 +788,11 @@ const TEACH_HINTS = {
 
 /**
  * 教学说明短于这个长度就算「泛泛一句」，不拿它顶替动作说明（宁可留空交给模型）。
- * 现有条目最长的二十来字、最短的十个字，空串那几条正是没有具体解释的写法。
+ * 实测：22 条里 3 条是空串（fs / process / path，本就没有具体解释可讲），
+ * 非空的最短 10 字、最长 35 字。阈值取 8 卡在 0 与 10 之间，当前只拦得住空串，
+ * 留出余量是为了以后新增条目时短句自动被拦，不用再改判定。
  */
-const MIN_TEACH_HINT = 8
+export const MIN_TEACH_HINT = 8
 
 /**
  * 把「为什么这么写」压进行尾注释，不再单独出面板。
@@ -794,6 +812,8 @@ export function enrichLineNotes(code, lang, notes) {
     const hit = teachLine(lines[index])
     const hint = hit ? TEACH_HINTS[hit.key] : ''
     if (!note) {
+      // 注释行、纯括号行本来就不解释，别给它们补教学说明
+      if (!needsNote(lines[index])) return ''
       // 动作说明为空：只有教学说明够具体、且这条写法还没讲过时，才拿它当这行的注释
       if (!hint || hint.length < MIN_TEACH_HINT) return ''
       if (seen.has(hit.key) || seenBare.has(hit.key)) return ''
@@ -801,8 +821,11 @@ export function enrichLineNotes(code, lang, notes) {
       return clip(redact(hint), 60)
     }
     if (!hit) return note
+    // 这条写法已经由前面的空说明行讲过，就不再追加一遍
+    if (seenBare.has(hit.key)) return note
     if (seen.has(hit.key)) return clip(note + '（同上）', 60)
-    seen.add(hit.key)
+    // 没有具体解释可追加的写法不记账，否则第二次出现会被错标「（同上）」
+    if (hint) seen.add(hit.key)
     // 说明本身已经很长时不再追加通用写法，避免把具体表达式挤出屏幕
     return hint && note.length < 40 ? clip(note + '，' + hint, 96) : note
   })

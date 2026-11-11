@@ -216,6 +216,9 @@ const second = await call(runtime.route(), { url: API + '/line-notes?hash=' + fi
 assert.equal(second.statusCode, 200)
 assert.equal(second.json.aiStatus, 'done')
 assert.equal(second.json.notes[7], '把每一条都交给 fmt 处理一遍')
+// 规则给的注释不被 AI 覆盖；请求里只要那一行（第 8 行，1-based）
+assert.equal(second.json.notes[5], '=>（箭头函数）给排序/筛选传一段规则')
+assert.match(llm.calls[0].messages[0].content[0].text, /请解释这些行号：8(\s|$)/)
 assert.equal(llm.calls.length, 1)
 assert.equal(llm.calls[0].provider, 'p1')
 assert.equal(llm.calls[0].model, 'm1')
