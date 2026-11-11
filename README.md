@@ -123,6 +123,7 @@ dsh plugin --profile desktop remove dsh-code-explainer
 ### 宿主半身（`index.js`）
 
 1. `POST /line-notes` 收到代码文本后，先用本地规则逐行给动作说明（零成本、零等待），再用 `enrichLineNotes` 把通用写法、术语对照压进同一句行尾注释。
+   - **语言判定不只看标签**：工具卡的代码块大多没有 `lang`，所以标签缺席时按内容特征判方言：逐行看像不像 PowerShell 语句（`$var =` 赋值、`Get-ChildItem` 形式的动词-名词 Cmdlet、`| Cmdlet` 管道、`$env:` / `$_` / `$ErrorActionPreference` 这类自动变量），也逐行看像不像 JS（`const` / `import` / `console.` / `=>` / 收尾括号）。PowerShell 语句至少 2 行、且比 JS 语句多（只有一行的块，只要那行是 PowerShell 也算），才把整块当 shell 讲；否则退回 JS 规则。判定前先摘掉记录里带出来的提示符（`PS C:\work>`、`PS>`），Cmdlet 不分大小写，`$btn = $("#id")` 这种 jQuery 不算 PowerShell 赋值，`||` 不算管道。行数对峙比打分更稳：一段 JS 里夹一句 PowerShell 字符串时，打分版会整块误判成 shell。
 2. 规则给不出动作说明的行，用 `ctx.llm.stream()` 请模型按行号补一句；结果按内容哈希缓存，同一段代码不重复请求。
 3. 模型输出是 `{"notes":{"行号":"说明"}}`；解析失败、超时、没有可用模型时保留规则结果，不阻塞页面。
 4. AI 补出的行直接进入同一个 `notes` 数组，前端不再需要额外字段。补充结果写入 `~/.dsh/dsh-code-explainer/line-notes.jsonl`（最多读回最近 800 条）。
@@ -152,6 +153,7 @@ dsh plugin --profile desktop remove dsh-code-explainer
 - `node --check index.js / rules.js / client.js / test/smoke.mjs` 通过。
 - `node test/smoke.mjs` 通过：逐行规则、具体 API 识别（`import()`/`require()`、`fs`、`path`、`process`）、同写法去重、未识别标注、凭据掩码、HTTP、模型补充、哈希缓存、运行中不请模型、无模型降级、落盘脱敏。
 - `node test/output-card.mjs` 通过：用最小 DOM 桩复刻宿主的 ioCard > ioSection >（ioLabel + ioText）结构，断言总述挂在外侧、ioSection 始终只有两个子节点、拆行不改原文。把旧实现塞回 ioSection 里跑，这条测试立刻红。
+- `node test/powershell.mjs` 通过：无标签的 PowerShell 代码按 shell 规则解释（`$ErrorActionPreference` 赋值、`Start-Sleep`、`New-Object`、`Get-ChildItem | Where-Object`、`Out-File` 都给具体说明），JS 的赋值/减法/按位或不会被误判。
 - 代码块 DOM 契约（`.md-code-block` / `[data-code-block-banner]` / `pre > code > span.line` / 复制读 `pre.textContent`）来自 DSH `0.2.1-rc.5` 前端产物的实现。
 - **DSH 0.2.1-rc.5 实测**（插件 0.4.0，`run_code` 执行 `const fs = await import("node:fs"); console.log(fs.readdirSync("D:\\project\\demo").slice(0, 3));`）：
   - 该行行尾注释为「动态加载 文件系统模块 fs，返回模块对象，后面用 fs 调用；node: 前缀表示 Node 内置模块」，不再只讲 `await`/`const`；
@@ -161,6 +163,7 @@ dsh plugin --profile desktop remove dsh-code-explainer
   - 点复制按钮后剪贴板得到的是完整原始代码，不含任何注释；
   - 截图仅用于本地验证，不随仓库发布。
 - 修正过：`ops_bash` 的输入 JSON 与输出共用同一 DOM 结构，已按「输入/输出」标签过滤；面板时代代码块高度被压缩的问题随面板删除一并消失。
+- 修正过（0.4.2）：工具卡的代码块几乎都没有 `lang` 标签，PowerShell 语句一律按 JS 规则处理、一句都判不出（#4 采样 1630 行里具体说明只有 5.6%）。现在标签缺席时按内容判方言。实测同一批样本（25 个最大的会话记录、15 个含 PowerShell 特征的代码块、378 行），PowerShell 行有说明的比例从 6.6%（25 行）升到 20.6%（78 行）。
 - 修正过（0.4.1）：输出区的总述原本插进 `ioSection` 内部，等于给两列 grid 加了第三个子节点，正文被挤到下一行、上面留一大片空白。现在改成插在 `ioSection` 外侧，并补了 `test/output-card.mjs`。
 
 **没有验证**（离线测试不能替代）：
@@ -172,6 +175,7 @@ dsh plugin --profile desktop remove dsh-code-explainer
 
 - 依赖宿主代码块的 DOM 契约（`span.line`、`data-code-block-banner`）；DSH 前端大改时需要同步改选择器。
 - 输出区版式依赖宿主 `ioSection` 是「两列 grid」这一事实：插件只往它外面加节点，绝不插进去；宿主若改成 flex，`test/output-card.mjs` 需要同步。
+- 内容判方言是启发式：PowerShell 与其它脚本长得像时会漏判（仍按 JS 讲），继续补特征时要注意别把 JS 误判成 shell。
 - 多行字符串里的行也会被当作独立代码行判断，可能出现不准确的注释。
 - 长行注释是否换行，按代码块可见宽度和字符数估算（约 7.2px/字符）；不同字号或等比缩放时可能提前/延后换行。
 - 一行里有多个表达式嵌套时只讲外层：如 `fs.readFileSync(path.join(__dirname, "a.json"), "utf8")`，可能把 `path.join` 里的字符串误当成文件路径和编码选项。
@@ -190,6 +194,8 @@ node --check index.js
 node --check rules.js
 node --check client.js
 node test/smoke.mjs
+node test/output-card.mjs
+node test/powershell.mjs
 ```
 
 冒烟测试使用临时目录（`DSH_CODE_EXPLAINER_DIR`），不会写入真实的 `~/.dsh` 数据。

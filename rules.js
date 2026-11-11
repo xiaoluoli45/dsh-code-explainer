@@ -167,18 +167,101 @@ const COMMAND_RULES = [
     title: '检查文件或命令是否存在',
     action: '确认某个文件或命令是否存在',
   },
+  {
+    test: /^\s*\$(?:env:)?[A-Za-z_][A-Za-z0-9_]*\s*(?:[+\-*/]?=)/,
+    title: '给变量设一个值',
+    action: '先给这个变量设一个值，后面还会用到',
+  },
+  {
+    test: /\bStart-Sleep\b/i,
+    title: '暂停一会儿',
+    action: '先暂停一会儿，等时间到了再继续',
+  },
+  {
+    test: /\bNew-Object\b/i,
+    title: '新建一个对象',
+    action: '新建一个对象，用它来干活',
+  },
+  {
+    test: /\bOut-File\b|\bSet-Content\b|\bAdd-Content\b/i,
+    title: '把结果写进文件',
+    action: '把刚才的结果写进一个文件',
+  },
+  {
+    // 放在最后：让上面更具体的规则先命中，管道只在没有更好解释时兜底
+    // \|\| 是「或者」不是管道，别把 npm test || exit 1 说成交接
+    test: /(?<!\|)\|(?!\||=)/,
+    title: '把结果交给下一步',
+    action: '把上一步的结果接着交给下一步处理',
+  },
 ]
 
 const SHELL_LANGS = /^(pwsh|powershell|ps1|bash|sh|shell|shellscript|zsh|cmd|bat|console|terminal)$/i
+
+/** 命令前的提示符（PS C:\\work> / PS> / C:\\>），记录里每行都可能带着 */
+const PS_PROMPT = /^\s*(?:PS[^>\n]{0,60}>|[A-Za-z]:\\[^>\n]{0,60}>)\s*/
+
+function stripPrompt(line) {
+  return str(line).replace(PS_PROMPT, '')
+}
+
+/** 一行像不像 PowerShell 语句：变量赋值、动词-名词 Cmdlet（不分大小写）、管道右端、自动变量 */
+const PS_STATEMENT =
+  /^\s*(?:\$(?:env:)?[A-Za-z_][A-Za-z0-9_]*\s*[+\-*/]?=|(?:Get|Set|New|Remove|Start|Stop|Restart|Invoke|Out|Write|Read|Test|Add|Copy|Move|Select|Where|ForEach|Sort|Measure|ConvertTo|ConvertFrom|Join|Split|Import|Export|Enable|Disable|Register|Unregister|Rename|Clear|Show|Format|Group|Compare|Resolve|Wait|Push|Pop|Enter|Exit|Find|Save|Update|Install)-[A-Za-z]{3,}\b|\|\s*[A-Z][A-Za-z]+-[A-Za-z]+|\$(?:env:|_|ErrorActionPreference|PSVersionTable|PSItem|true|false|null|args)\b)/i
+
+/** 一行像不像 JS/TS 语句：声明、导入、打印、箭头函数 */
+const JS_STATEMENT =
+  /^\s*(?:const|let|var|function|class|import|export|return|await|throw|if\s*\(|for\s*\(|while\s*\(|try\s*\{|catch\s*\(|console\.|\/\/)|=>/
+
+/** jQuery 的 $btn = $("#id") 不是 PowerShell 赋值 */
+function isPowerShellLine(line) {
+  const text = stripPrompt(line).trim()
+  if (!text) return false
+  if (text.includes('$(')) return false
+  return PS_STATEMENT.test(text)
+}
+
+/** PS 块里也有 if (...) / for (...) 和 }，别把它们算成 JS 证据 */
+function isJsLine(line) {
+  const text = stripPrompt(line).trim()
+  if (!text) return false
+  if (isPowerShellLine(text)) return false
+  if (/^(?:if|for|while|switch|try|catch)\b/.test(text)) return false
+  return JS_STATEMENT.test(text)
+}
+
+function countLines(code, predicate) {
+  let count = 0
+  for (const line of str(code).split(/\r?\n/)) {
+    if (line.trim() && predicate(line)) count += 1
+  }
+  return count
+}
+
+/**
+ * 没有语言标签时，靠内容特征认出 PowerShell。
+ * 判据：PowerShell 语句至少 2 行且比 JS 语句多；单行块只要是 PowerShell 也算。
+ * 宁可不判——判不准就退回 JS 规则，免得把夹着 PowerShell 字符串的 JS 整块当 shell 讲。
+ */
+function looksLikePowerShell(code) {
+  const psLines = countLines(code, isPowerShellLine)
+  const jsLines = countLines(code, isJsLine)
+  if (psLines === 1 && jsLines === 0) return true
+  return psLines >= 2 && psLines > jsLines
+}
 
 function shortNote(text) {
   return clip(redact(str(text).replace(/。$/, '')), 30)
 }
 
 /** 一条命令行 → 一句说明；认不出来返回 '' */
+/** 一条命令行 → 一句说明（可以带 PS C:\\work> 这类提示符） */
 export function explainCommandLine(line) {
-  const text = str(line).trim()
+  // 有的记录把提示符一起贴出来（PS C:\work> Get-ChildItem），先摘掉再判断
+  const text = stripPrompt(line).trim()
   if (!text) return ''
+  // # 开头的整行是注释，没有动作可讲（bash、PowerShell 都一样）
+  if (/^#/.test(text)) return ''
   const matched = COMMAND_RULES.filter((rule) => rule.test.test(text))
   return matched.length > 0 ? shortNote(matched[0].action) : ''
 }
@@ -426,8 +509,11 @@ export function explainCodeLine(line) {
  * @returns {string[]}
  */
 export function explainCodeLines(code, lang) {
-  const lines = str(code).split(/\r?\n/)
-  const shellLike = SHELL_LANGS.test(str(lang).trim())
+  // 记录里常把提示符一起贴出来，判定和解释都先摘掉，行数不变
+  const lines = str(code).split(/\r?\n/).map(stripPrompt)
+  const declared = str(lang).trim()
+  // 工具卡的代码块通常没有语言标签：标签缺席时靠内容认方言，认不准仍按代码处理
+  const shellLike = SHELL_LANGS.test(declared) || (!declared && looksLikePowerShell(lines.join('\n')))
   return lines.map((line) => (shellLike ? explainCommandLine(line) : explainCodeLine(line)))
 }
 
