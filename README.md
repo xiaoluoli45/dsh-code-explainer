@@ -111,7 +111,7 @@ dsh plugin --profile desktop remove dsh-code-explainer
 
 ### 浏览器半身（`client.js`）
 
-1. 在 `[data-chat-call-id]` 里的 `.md-code-block` 上找到**输入**代码块，取出每行文本（`pre > code > span.line`）。
+1. 在 `[data-chat-call-id]` 里的 `.md-code-block` 上找到**输入**代码块，取出每行文本（`pre > code > span.line`）。没有 `.line` 的纯文本块（没有语言标注、或高亮包还没加载）按行补出 `span.line` 再挂注释：行与行之间留一个 `\n` 文本节点，`pre.textContent` 因此逐字不变。
 2. `POST /line-notes` 拿逐行说明；对每个 `.line` 只写 `data-dce-note` 属性。
 3. 说明由 CSS 伪元素渲染：`content: "  // " attr(data-dce-note)`。伪元素不进入 `textContent`，所以复制按钮（读 `pre.textContent`）拿到的仍是原代码，选中也不会带注释。长行按可见宽度加 `data-dce-long="1"`，注释换到下一行。
 4. **输出区**（`[class*="ioText"]`）先分类：代码 → 去掉 `1: ` 行号后按行说明（蓝色 `→`）；JSON/日志/清单/普通文本 → 输出块上方插一行 `.dce-io-head` 总述，关键行写 `data-dce-onote`。按行拆分时只用 `<span class="dce-ol">` 保留原文字与换行，说明仍走伪元素。
@@ -153,6 +153,7 @@ dsh plugin --profile desktop remove dsh-code-explainer
 - `node --check index.js / rules.js / client.js / test/smoke.mjs` 通过。
 - `node test/smoke.mjs` 通过：逐行规则、具体 API 识别（`import()`/`require()`、`fs`、`path`、`process`）、同写法去重、未识别标注、凭据掩码、HTTP、模型补充、哈希缓存、运行中不请模型、无模型降级、落盘脱敏。
 - `node test/output-card.mjs` 通过：用最小 DOM 桩复刻宿主的 ioCard > ioSection >（ioLabel + ioText）结构，断言总述挂在外侧、ioSection 始终只有两个子节点、拆行不改原文。把旧实现塞回 ioSection 里跑，这条测试立刻红。
+- `node test/plain-block.mjs` 通过：无语言标注、语言标签不认识（`dsh-ui` 这类第三方 fence）的纯文本块也逐行补出 `span.line` 并挂上注释，`pre.textContent` 逐字不变，已有 `span.line` 的块行节点不被重建，二次扫描不套娃，宿主重写文本后下一次扫描能接回来；`card[data-state="running"]` 里先不补行，落定后再补。把 `annotateBlock` 早退那行放回去，这条测试立刻红。
 - `node test/teach.mjs` 通过：教学层能补进动作说明为空的行、已有动作说明的行逐字不变、泛泛写法不硬填、同一写法跨分支只讲一次、注释行不补。它还钉着 `TEACH_HINTS` 的表级不变量（每条要么为空、要么达到 `MIN_TEACH_HINT`）。
 - `node test/powershell.mjs` 通过：无标签的 PowerShell 代码按 shell 规则解释（`$ErrorActionPreference` 赋值、`Start-Sleep`、`New-Object`、`Get-ChildItem | Where-Object`、`Out-File` 都给具体说明），JS 的赋值/减法/按位或不会被误判。
 - 代码块 DOM 契约（`.md-code-block` / `[data-code-block-banner]` / `pre > code > span.line` / 复制读 `pre.textContent`）来自 DSH `0.2.1-rc.5` 前端产物的实现。
@@ -164,6 +165,7 @@ dsh plugin --profile desktop remove dsh-code-explainer
   - 点复制按钮后剪贴板得到的是完整原始代码，不含任何注释；
   - 截图仅用于本地验证，不随仓库发布。
 - 修正过：`ops_bash` 的输入 JSON 与输出共用同一 DOM 结构，已按「输入/输出」标签过滤；面板时代代码块高度被压缩的问题随面板删除一并消失。
+- 修正过（0.4.5）：宿主的代码块渲染器 `iw()` 里 `lineNumbers` 默认 `false`，而唯一调用点 `iU()` 从不传它，所以「没有语言标注 / 语言包还没加载」的块渲染成 `<pre class="plain"><code>整段文本</code></pre>`——里面一个 `span.line` 都没有。`annotateBlock` 早先在这里直接早退，结果是这类块零注释、连「注释：开/关」按钮都不出现（#10）。现在拿不到 `.line` 且 `code` 里没有元素子节点时，按行补出宿主自己的 `span.line`（`\n` 文本节点夹在中间），再走同一条 `data-dce-note` 路径；有元素子节点的块（别的渲染器接了手）一根手指都不动。流式渲染中的块先不补——宿主会反复重写那段纯文本，补出来的行下一次渲染就没了。会话采样（40 个最大会话、994 个 fence、剔除 `dsh-ui` 等第三方 fence 后 642 块）里 478 块（74.5%）属于这一类，改动前它们一行注释都没有。
 - 修正过（0.4.4）：0.4.3 的判定顺序留了两个尾巴——空说明行讲过的写法，后面的说明行又会追加一遍（同一写法讲两次）；空说明分支没有「值得解释」的门禁，注释行和 JSDoc 也被补上教学说明。现在 `needsNote` 从宿主半身搬进 `rules.js` 共用（单一来源），空分支先过这道门禁；说明行遇到空行已经讲过的写法不再追加。另外修掉一处旧账：没有具体解释可追加的写法（`fs` / `process` / `path`）过去也会被记账，导致同写法第二次出现时被错标「（同上）」。
   复核口径——仓库自身 7 个源文件 2450 个非空行：新增说明 15 行；既有说明有 69 行发生变化，其中 57 行是去掉错标的「（同上）」、9 行是不再重复追加已讲过的教学半句、3 行是少了追加后不再被截断（露出更完整的原说明）；动作说明本身（`explainCodeLines` 的输出）一处未改。会话样本 876 行：新增 5 行、去掉重复半句 2 行。
 - 修正过（0.4.3）：教学层的「为什么」原本只能追加在已有动作说明的行后面——`enrichLineNotes` 先判断「说明为空就整行返回空串」，空说明行的教学命中被直接丢掉（`foo(async () => {})` 就是这种形状）。现在空说明行只要教学说明够具体（长度 ≥ 8，`fs` / `process` / `path` 这类没有具体解释的写法不算）就改用教学说明当行尾注释，同一写法只讲一次；已有动作说明的行保持原样。实测同一批会话样本 876 行，有说明的行 11.30% → 11.87%（这条「逐字不变」说得太满，0.4.4 修掉了两个尾巴）。
@@ -178,6 +180,7 @@ dsh plugin --profile desktop remove dsh-code-explainer
 ## 已知边界
 
 - 依赖宿主代码块的 DOM 契约（`span.line`、`data-code-block-banner`）；DSH 前端大改时需要同步改选择器。
+- 纯文本块的补行是一次性改写：宿主把文本节点换成了行 span，如果它在**落定之后**又原地改写这段文本（React 会往已经摘下来的那个文本节点上写），补出来的行会停在旧文本上，要等整块重挂才恢复。所以流式期间先不补行。
 - 输出区版式依赖宿主 `ioSection` 是「两列 grid」这一事实：插件只往它外面加节点，绝不插进去；宿主若改成 flex，`test/output-card.mjs` 需要同步。
 - 内容判方言是启发式：PowerShell 与其它脚本长得像时会漏判（仍按 JS 讲），继续补特征时要注意别把 JS 误判成 shell。
 - 多行字符串里的行也会被当作独立代码行判断，可能出现不准确的注释。
@@ -199,6 +202,7 @@ node --check rules.js
 node --check client.js
 node test/smoke.mjs
 node test/output-card.mjs
+node test/plain-block.mjs
 node test/powershell.mjs
 node test/teach.mjs
 ```

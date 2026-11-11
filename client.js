@@ -148,6 +148,43 @@ window.__ModuleLoader__.load({
       return out
     }
 
+    /**
+     * 宿主没给 span.line 的块（没有语言标注、语言包还没加载时走 <pre class="plain">
+     * 里一整段文本）按行补出 span.line。
+     *
+     * 为什么补成 span.line 而不是自己的类名：宿主自己就是这种结构——它在需要行号时
+     * 正是「一个 '\n' 文本节点 + 一个 span.line」拼出来的，行内样式和换行规则天然兼容。
+     * 行与行之间留那个文本节点，于是 pre.textContent 逐字不变，复制拿到的还是原文。
+     */
+    function materializeLines(code) {
+      var raw = code.textContent || ''
+      if (!raw) return []
+      var parts = raw.split('\n')
+      var fragment = document.createDocumentFragment()
+      var spans = []
+      for (var i = 0; i < parts.length; i += 1) {
+        var span = document.createElement('span')
+        span.className = 'line'
+        span.textContent = parts[i]
+        fragment.appendChild(span)
+        spans.push(span)
+        if (i < parts.length - 1) fragment.appendChild(document.createTextNode('\n'))
+      }
+      code.replaceChildren(fragment)
+      return spans
+    }
+
+    /** lineNodes 的读法不变；只有在拿不到行、且确实是纯文本块时才补一次 */
+    function ensureLineNodes(block) {
+      var lines = lineNodes(block)
+      if (lines.length > 0) return lines
+      var code = block.querySelector('pre > code')
+      if (!code) return []
+      // 有元素子节点说明宿主已经给了别的结构（行号、第三方高亮片段），不是纯文本块
+      if (code.children.length > 0) return []
+      return materializeLines(code)
+    }
+
     function langOf(block) {
       var banner = block.querySelector('[data-code-block-banner]')
       if (!banner) return ''
@@ -284,6 +321,12 @@ window.__ModuleLoader__.load({
     function annotateBlock(block, isOutput) {
       if (!block.isConnected) return
       var lines = lineNodes(block)
+      if (lines.length === 0) {
+        // 流式渲染时宿主会反复重写这一段纯文本：此刻补出来的行，下一次渲染就被丢掉，
+        // 注释却还按旧内容的 hash 挂在已经不存在的行上。等这一块落定再补。
+        if (!isSettled(block)) return
+        lines = ensureLineNodes(block)
+      }
       if (lines.length === 0) return
       if (!isOutput) ensureToggle(block)
 
