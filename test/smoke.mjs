@@ -122,6 +122,7 @@ const SAMPLE = [
   '});',
   'entries.sort((a, b) => a.size - b.size);',
   'console.log(JSON.stringify(r, null, 2));',
+  'entries.map(fmt);',
 ].join('\n')
 
 /* ── 1. 纯规则 ──────────────────────────────────────────────────────── */
@@ -137,6 +138,7 @@ assert.equal(notes[3], '最多等 60 秒')
 assert.equal(notes[4], '')
 assert.equal(notes[5], '')
 assert.equal(notes[6], '把结果打印出来')
+assert.equal(notes[7], '')
 
 // 具体表达式：模块、返回值、参数都要讲到，而不是只报语法名
 const dynamicImport = explainCodeLines('const fs = await import("node:fs");', 'js')[0]
@@ -174,7 +176,8 @@ assert.ok(enriched[2].includes('可选参数'))
 assert.ok(enriched[3].includes('最多等 60 秒'))
 assert.ok(enriched[3].includes('timeoutMs（超时毫秒）'))
 assert.equal(enriched[4], '')
-assert.equal(enriched[5], '')
+// #9：动作说明为空、教学说明具体的行，改用教学说明当注释
+assert.equal(enriched[5], '=>（箭头函数）给排序/筛选传一段规则')
 
 const repeated = enrichLineNotes('const a = await f()\nconst b = await g()', 'js', [
   '等第一步做完',
@@ -188,7 +191,7 @@ assert.ok(!repeated[1].includes('等待异步完成'))
 /* ── 2. HTTP + AI 补充 ──────────────────────────────────────────────── */
 
 const answer = JSON.stringify({
-  notes: { 6: '把这几项按大小排好顺序' },
+  notes: { 8: '把每一条都交给 fmt 处理一遍' },
 })
 const llm = fakeLlm(answer)
 const runtime = createRuntime({ llm })
@@ -203,7 +206,8 @@ assert.equal(first.json.ok, true)
 assert.equal(first.json.aiStatus, 'running')
 assert.ok(first.json.notes[0].includes('调用命令行工具，把结果存起来'))
 assert.ok(first.json.notes[0].includes('await（等待异步完成）'))
-assert.equal(first.json.notes[5], '')
+assert.equal(first.json.notes[5], '=>（箭头函数）给排序/筛选传一段规则')
+assert.equal(first.json.notes[7], '')
 assert.ok(first.json.hash)
 
 // 等 AI 队列跑完
@@ -211,7 +215,7 @@ await new Promise((resolve) => setTimeout(resolve, 300))
 const second = await call(runtime.route(), { url: API + '/line-notes?hash=' + first.json.hash })
 assert.equal(second.statusCode, 200)
 assert.equal(second.json.aiStatus, 'done')
-assert.equal(second.json.notes[5], '把这几项按大小排好顺序')
+assert.equal(second.json.notes[7], '把每一条都交给 fmt 处理一遍')
 assert.equal(llm.calls.length, 1)
 assert.equal(llm.calls[0].provider, 'p1')
 assert.equal(llm.calls[0].model, 'm1')
@@ -234,7 +238,7 @@ assert.equal(blocked.statusCode, 403)
 await new Promise((resolve) => setTimeout(resolve, 200))
 const stored = fs.readFileSync(path.join(tempDir, 'line-notes.jsonl'), 'utf8')
 assert.ok(stored.includes(first.json.hash))
-assert.ok(stored.includes('把这几项按大小排好顺序'))
+assert.ok(stored.includes('把每一条都交给 fmt 处理一遍'))
 assert.ok(!stored.includes(FAKE_KEY))
 
 runtime.dispose()
@@ -265,7 +269,7 @@ assert.equal(settle.json.aiStatus, 'running')
 await new Promise((resolve) => setTimeout(resolve, 300))
 const settled = await call(deferred.route(), { url: API + '/line-notes?hash=' + settle.json.hash })
 assert.equal(settled.json.aiStatus, 'done')
-assert.equal(settled.json.notes[5], '把这几项按大小排好顺序')
+assert.equal(settled.json.notes[7], '把每一条都交给 fmt 处理一遍')
 assert.equal(deferredLlm.calls.length, 1)
 deferred.dispose()
 fs.rmSync(deferredDir, { recursive: true, force: true })
@@ -286,7 +290,7 @@ await new Promise((resolve) => setTimeout(resolve, 200))
 const offlineState = await call(offline.route(), { url: API + '/line-notes?hash=' + fallback.json.hash })
 assert.equal(offlineState.json.aiStatus, 'failed')
 // 规则认不出、模型也没补上的调用要明确标「未识别」，不能默默跳过
-assert.ok(offlineState.json.notes[5].includes('未识别'))
+assert.ok(offlineState.json.notes[7].includes('未识别'))
 
 const offConfig = createRuntime({ llm: fakeLlm(answer), config: { llm: 'off' } })
 const offResult = await call(offConfig.route(), {

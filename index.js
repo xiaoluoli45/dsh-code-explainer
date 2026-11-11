@@ -27,7 +27,7 @@ export const name = 'dsh-code-explainer'
 export const inject = ['webServer']
 
 const API_PATH = '/dsh-code-explainer/api'
-const PLUGIN_VERSION = '0.4.2'
+const PLUGIN_VERSION = '0.4.3'
 const MAX_BODY = 256 * 1024
 const MAX_CODE_CHARS = 20000
 const MAX_AI_LINES = 120

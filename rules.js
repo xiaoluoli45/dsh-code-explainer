@@ -771,8 +771,14 @@ const TEACH_HINTS = {
 }
 
 /**
+ * 教学说明短于这个长度就算「泛泛一句」，不拿它顶替动作说明（宁可留空交给模型）。
+ * 现有条目最长的二十来字、最短的十个字，空串那几条正是没有具体解释的写法。
+ */
+const MIN_TEACH_HINT = 8
+
+/**
  * 把「为什么这么写」压进行尾注释，不再单独出面板。
- * 没有动作说明的行保持空字符串，交给模型补；同一写法只在第一次解释，后续标「（同上）」。
+ * 已有动作说明的行在末尾追加半句；动作说明为空的行改用教学说明（具体时），剩下的交给模型补；同一写法只讲一次。
  * @param {string} code
  * @param {string} [lang]
  * @param {string[]} notes explainCodeLines 的结果
@@ -781,14 +787,22 @@ const TEACH_HINTS = {
 export function enrichLineNotes(code, lang, notes) {
   const lines = str(code).split(/\r?\n/)
   const seen = new Set()
+  // 动作说明为空的行单独记一遍：它只借用教学说明，不该把「（同上）」的账记到正常行上
+  const seenBare = new Set()
   return (Array.isArray(notes) ? notes : []).map((raw, index) => {
     const note = str(raw)
-    if (!note) return ''
     const hit = teachLine(lines[index])
+    const hint = hit ? TEACH_HINTS[hit.key] : ''
+    if (!note) {
+      // 动作说明为空：只有教学说明够具体、且这条写法还没讲过时，才拿它当这行的注释
+      if (!hint || hint.length < MIN_TEACH_HINT) return ''
+      if (seen.has(hit.key) || seenBare.has(hit.key)) return ''
+      seenBare.add(hit.key)
+      return clip(redact(hint), 60)
+    }
     if (!hit) return note
     if (seen.has(hit.key)) return clip(note + '（同上）', 60)
     seen.add(hit.key)
-    const hint = TEACH_HINTS[hit.key]
     // 说明本身已经很长时不再追加通用写法，避免把具体表达式挤出屏幕
     return hint && note.length < 40 ? clip(note + '，' + hint, 96) : note
   })
