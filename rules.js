@@ -211,8 +211,6 @@ const COMMAND_RULES = [
   },
 ]
 
-const SHELL_LANGS = /^(pwsh|powershell|ps1|bash|sh|shell|shellscript|zsh|cmd|bat|console|terminal)$/i
-
 /** 命令前的提示符（PS C:\\work> / PS> / C:\\>），记录里每行都可能带着 */
 const PS_PROMPT = /^\s*(?:PS[^>\n]{0,60}>|[A-Za-z]:\\[^>\n]{0,60}>)\s*/
 
@@ -253,16 +251,143 @@ function countLines(code, predicate) {
   return count
 }
 
+/* ── 方言判定：唯一入口 ─────────────────────────────────────────────── */
+
+/** 置信度门槛：低于它只出块级总述，不逐行猜 */
+export const MIN_CONFIDENCE = 0.6
+
+/** 声明标签 → 规范语言名；一个语言允许多种写法，判定只认这一张表 */
+const TAG_ALIASES = {
+  powershell: ['powershell', 'pwsh', 'ps1', 'psm1', 'posh'],
+  shell: ['bash', 'sh', 'shell', 'shellscript', 'zsh', 'cmd', 'bat', 'dos', 'console', 'terminal'],
+  js: ['js', 'javascript', 'jsx', 'mjs', 'cjs', 'node', 'nodejs', 'ts', 'typescript', 'tsx'],
+  python: ['python', 'py', 'python3', 'py3'],
+  java: ['java'],
+  data: ['json', 'jsonc', 'json5', 'yaml', 'yml', 'toml'],
+  markup: ['xml', 'html', 'htm', 'svg', 'markdown', 'md'],
+}
+
+/** 语言档位：1 逐行硬保 / 2 高频行 / 3 只讲结构 */
+const TIERS = { shell: 1, js: 1, powershell: 1, python: 2, java: 2, data: 3, markup: 3, unknown: 3 }
+
+/** 这些标签只是「没写语言」，不是「这是另一种语言」，按无声明处理 */
+const GENERIC_TAGS = new Set(['', 'text', 'txt', 'plain', 'plaintext', 'none', 'unknown', 'output', 'log'])
+
+/** 一行像不像 Python：def/class/import/from/print/with/self./f-string/__name__ */
+const PY_STATEMENT =
+  /^\s*(?:def\s+\w+\s*\(|class\s+\w+\s*[:(]|import\s+[\w.]+|from\s+[\w.]+\s+import\s+|print\s*\(|if\s+__name__|for\s+\w+\s+in\s+|with\s+[\w.]+\s*(?:\(|as\s)|elif\s+|self\.\w+|@\w+|f["'])/
+
+/** 一行像不像 Java：包声明、修饰符、注解、System.out、带类型的方法签名 */
+const JAVA_STATEMENT =
+  /^\s*(?:package\s+[\w.]+;?|import\s+(?:static\s+)?javax?\.[\w.*]+;|(?:public|private|protected)\s|@(?:Override|SuppressWarnings|Deprecated|Test)\b|System\.out\.|(?:void|int|long|String|boolean|double|float|char)\s+\w+\s*\(|final\s+[A-Z]|new\s+[A-Z]\w*\s*[(<])/
+
+function isPythonLine(line) {
+  const text = stripPrompt(line).trim()
+  if (!text) return false
+  if (/^(?:if|for|while|return)\s*[({]/.test(text)) return false
+  return PY_STATEMENT.test(text)
+}
+
+function isJavaLine(line) {
+  const text = stripPrompt(line).trim()
+  if (!text) return false
+  return JAVA_STATEMENT.test(text)
+}
+
+/** 整块是不是 JSON：能整段 parse 成功的 {…} / […] 才算，不靠首字符猜 */
+function looksLikeJson(code) {
+  const text = str(code).trim()
+  if (!/^[{[]/.test(text)) return false
+  try {
+    const value = JSON.parse(text)
+    return value !== null && typeof value === 'object'
+  } catch {
+    return false
+  }
+}
+
+/** 整块像不像标记语言：XML 声明、DOCTYPE、或首行就是 <tag …> */
+function looksLikeMarkup(code) {
+  const text = str(code).trim()
+  return /^(?:<\?xml[^>]*>|<!DOCTYPE\s|<[A-Za-z][\w:-]*(?:\s[^>]*)?\/?>)/i.test(text)
+}
+
+/** 声明归一：'.ps1' / 'language-ps1' / 'PS1' 都收敛到 powershell */
+function normalizeTag(declared) {
+  let tag = str(declared).trim().toLowerCase()
+  if (!tag) return ''
+  tag = tag.replace(/^language-/, '').replace(/^\./, '')
+  if (GENERIC_TAGS.has(tag)) return ''
+  for (const [lang, aliases] of Object.entries(TAG_ALIASES)) {
+    if (aliases.includes(tag)) return lang
+  }
+  return tag
+}
+
 /**
- * 没有语言标签时，靠内容特征认出 PowerShell。
- * 判据：PowerShell 语句至少 2 行且比 JS 语句多；单行块只要是 PowerShell 也算。
- * 宁可不判——判不准就退回 JS 规则，免得把夹着 PowerShell 字符串的 JS 整块当 shell 讲。
+ * 没有声明（或声明是具体但未知的语言）时，按内容特征判一次。
+ * @returns {{lang: string, confidence: number}}
  */
-function looksLikePowerShell(code) {
-  const psLines = countLines(code, isPowerShellLine)
-  const jsLines = countLines(code, isJsLine)
-  if (psLines === 1 && jsLines === 0) return true
-  return psLines >= 2 && psLines > jsLines
+function sniffDialect(code) {
+  const text = str(code)
+  if (!text.trim()) return { lang: 'unknown', confidence: 0 }
+  if (looksLikeJson(text)) return { lang: 'data', confidence: 0.9 }
+  if (looksLikeMarkup(text)) return { lang: 'markup', confidence: 0.85 }
+
+  const counts = {
+    powershell: countLines(text, isPowerShellLine),
+    js: countLines(text, isJsLine),
+    python: countLines(text, isPythonLine),
+    java: countLines(text, isJavaLine),
+  }
+  const total = counts.powershell + counts.js + counts.python + counts.java
+  if (total === 0) return { lang: 'unknown', confidence: 0 }
+
+  // 平手时按这个顺序取先者：PowerShell 判据最具体，Java 最宽松
+  const order = ['powershell', 'js', 'python', 'java']
+  let best = 'unknown'
+  for (const lang of order) {
+    if (best === 'unknown' || counts[lang] > counts[best]) best = lang
+  }
+  const share = counts[best] / total
+  const tied = order.some((lang) => lang !== best && counts[lang] === counts[best])
+  const confidence = Math.max(0.6, Math.min(0.95, 0.6 + 0.35 * share - (tied ? 0.1 : 0)))
+  return { lang: best, confidence }
+}
+
+/**
+ * 方言判定的唯一入口。
+ * @param {string} code 整段代码（已去掉提示符也行）
+ * @param {string} [declared] fence 标签 / 工具名 / 文件扩展名
+ * @returns {{lang: string, tier: number, confidence: number, source: 'declared'|'content'}}
+ */
+export function detectDialect(code, declared) {
+  const tag = normalizeTag(declared)
+  const known = tag && Object.prototype.hasOwnProperty.call(TIERS, tag) && tag !== 'unknown'
+  if (known) {
+    return { lang: tag, tier: TIERS[tag], confidence: 0.95, source: 'declared' }
+  }
+  const sniffed = sniffDialect(code)
+  if (!tag) {
+    return { lang: sniffed.lang, tier: TIERS[sniffed.lang] || 3, confidence: sniffed.confidence, source: 'content' }
+  }
+  // 声明了一个具体但不在档位表里的语言（go/rust/php…）：内容只用来打底，置信度压在门槛以下
+  if (sniffed.lang === 'unknown') {
+    return { lang: 'unknown', tier: 3, confidence: 0, source: 'declared' }
+  }
+  return {
+    lang: sniffed.lang,
+    tier: TIERS[sniffed.lang] || 3,
+    confidence: Math.min(sniffed.confidence, 0.5),
+    source: 'content',
+  }
+}
+
+/** 这一段值不值得逐行解释：Tier 1/2 且置信度够 */
+export function shouldExplainPerLine(detection) {
+  if (!detection || detection.lang === 'unknown') return false
+  if (detection.tier > 2) return false
+  return detection.confidence >= MIN_CONFIDENCE
 }
 
 function shortNote(text) {
@@ -526,10 +651,11 @@ export function explainCodeLine(line) {
 export function explainCodeLines(code, lang) {
   // 记录里常把提示符一起贴出来，判定和解释都先摘掉，行数不变
   const lines = str(code).split(/\r?\n/).map(stripPrompt)
-  const declared = str(lang).trim()
-  // 工具卡的代码块通常没有语言标签：标签缺席时靠内容认方言，认不准仍按代码处理
-  const shellLike = SHELL_LANGS.test(declared) || (!declared && looksLikePowerShell(lines.join('\n')))
-  return lines.map((line) => (shellLike ? explainCommandLine(line) : explainCodeLine(line)))
+  const detection = detectDialect(lines.join('\n'), lang)
+  // 认不准的块不逐行硬凑：块级总述交给上层，行尾保持空白
+  if (!shouldExplainPerLine(detection)) return lines.map(() => '')
+  const commandLike = detection.lang === 'shell' || detection.lang === 'powershell'
+  return lines.map((line) => (commandLike ? explainCommandLine(line) : explainCodeLine(line)))
 }
 
 /* ── 教学层：这一行用了什么通用写法 ─────────────────────────────────── */

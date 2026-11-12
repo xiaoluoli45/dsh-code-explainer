@@ -65,6 +65,18 @@ await 第一次出现   // 调用命令行工具，把结果存起来，await（
 
 规则覆盖不到的复杂行，交给模型补一句（见下）。
 
+## 语言范围（三档）
+
+判定只有一个入口 `detectDialect(code, declared)`：代码块标签优先，标签缺席时按内容特征兜底，两者都给不出把握时**不逐行猜**。
+
+| 档位 | 语言 | 怎么讲 |
+| --- | --- | --- |
+| Tier 1 · 逐行 | 命令行（bash / sh / cmd）、JavaScript / TypeScript、PowerShell | 本地规则保证每行都能出话，不依赖模型 |
+| Tier 2 · 高频行 | Python、Java | 常见写法（`def` / `import` / `print`，`public` / `class` / `System.out` 等）有规则，其余不硬凑 |
+| Tier 3 · 只讲结构 | JSON / YAML / XML / HTML / Markdown，以及其他语言 | 讲这块是什么、在描述什么；认不出来的行明说「这行我讲不了」，不拿通用话充数 |
+
+档位按「工具卡里实际出现多少行」排，不按语言流行度排：`run_code` 与 `ops_bash` 占了绝大多数行。
+
 ## 安装
 
 要求：DSH `>= 0.2.0`，Node `>= 20`。
