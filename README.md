@@ -77,6 +77,11 @@ await 第一次出现   // 调用命令行工具，把结果存起来，await（
 
 档位按「工具卡里实际出现多少行」排，不按语言流行度排：`run_code` 与 `ops_bash` 占了绝大多数行。
 
+Tier 2 各有一张薄规则表，命中一句就停，命中不了交回通用规则引擎（`if` / `for` / `return` 这类跨语言动作），再没有就留空：
+
+- Python：`__main__` / `def` / `class` / `from … import` / `import` / `self.` / `print(f"…")` / `print` / f-string / `for … in` / `return`
+- Java：`main` 入口 / `@Override` / `import java…` / `System.out` / 方法签名 / `class` / `interface` / `static` / 可见性修饰符 / `TODO` / `FIXME`（注释里的也算）
+
 ## 安装
 
 要求：DSH `>= 0.2.0`，Node `>= 20`。

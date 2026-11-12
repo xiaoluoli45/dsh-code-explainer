@@ -642,10 +642,79 @@ export function explainCodeLine(line) {
   return ''
 }
 
+/* ── Tier 2 语言包：Python / Java ──────────────────────────────────── */
+
+/**
+ * 两个语言包共用这条约定：一行字符串进来，命中就返回一句中文，不命中返回 ''。
+ * 挂在方言判定之后，所以不会和 Tier 1 的 JS/shell 规则抢同一行；
+ * 命中不了的行走既有的通用规则引擎（if / for / return 这类跨语言动作仍有着落），
+ * 再没答案就留空 —— 「通用话填充」不在这里补，那是 Tier 3 票的事。
+ */
+
+/** Python 10 条：__main__ / def / class / from…import / import / self. / print(f"") / print / f-string / for…in / return */
+const PY_RULES = [
+  [/^if\s+__name__\s*==\s*['"]__main__['"]/, () => '直接运行这个文件时，从这里开始执行'],
+  [/^def\s+(\w+)\s*\(/, (m) => '定义函数 ' + m[1] + '，把这段逻辑收起来复用'],
+  [/^class\s+(\w+)/, (m) => '定义类 ' + m[1] + '，把数据和对它的操作放在一起'],
+  [/^from\s+([\w.]+)\s+import\s+(.+)$/, (m) => '从 ' + m[1] + ' 里引入 ' + clip(m[2].trim(), 24)],
+  [/^import\s+([\w.]+)/, (m) => '引入 ' + m[1] + ' 模块'],
+  [/\bself\.(\w+)/, (m) => '访问这个对象自己的 ' + m[1]],
+  [/\bprint\s*\(\s*f["']/, () => '把变量直接拼进字符串，再打印出来'],
+  [/\bprint\s*\(/, () => '把内容打印到终端'],
+  [/\bf["'][^"']*\{[^}]+\}/, () => '用 f-string 把变量直接写进字符串里'],
+  [/^for\s+(\w+)\s+in\s+(.+?):?\s*$/, (m) => '逐个取出 ' + clip(m[2].replace(/:$/, '').replace(/\s+#.*$/, ''), 20) + ' 里的 ' + m[1]],
+  [/^return\b/, () => '把结果交回去，函数到此结束'],
+]
+
+/** Java 10 条：main 入口 / @Override / 方法签名 / class / interface / static / 可见性 / System.out / import java / TODO */
+const JAVA_RULES = [
+  [/\bstatic\s+void\s+main\s*\(\s*String/, () => '程序入口：从这里开始执行'],
+  [/^\s*@Override\b/, () => '覆写父类或接口里的同名方法，参数和返回值都要对得上'],
+  [/^\s*import\s+(?:static\s+)?javax?\.[\w.*]+/, () => '引入 Java 标准库里的类'],
+  [/\bSystem\.out\.(?:println|printf|print)/, () => '打印到控制台'],
+  // 方法签名：可见性之后可能还压着 synchronized / abstract / final 之类，类型也可能是泛型
+  [/^\s*(?:public|private|protected)\s+(?:(?:static|final|synchronized|abstract|native|strictfp)\s+)*(?:void|[A-Z][\w.<>\[\]]*|int|long|boolean|double|float|char|short|byte)\s+\w+\s*\(/, () => '定义一个方法，括号里是它需要的参数'],
+  [/^\s*(?:public|private|protected)\s+(?:static\s+)?(?:final\s+)?class\s+(\w+)/, (m) => '定义类 ' + m[1]],
+  [/\binterface\s+(\w+)/, (m) => '定义接口 ' + m[1] + '，只约定方法签名，实现留给各个类'],
+  [/\bstatic\b/, () => '属于类本身，不用先创建对象就能用'],
+  [/^\s*(?:public|private|protected)\b/, () => '标明谁能访问它（public 都能用／private 只在本类内）'],
+]
+
+/** 按表逐条试，第一条命中即返回；都不中返回 '' */
+function applyLanguageRules(rules, text) {
+  for (const [pattern, note] of rules) {
+    const match = text.match(pattern)
+    if (match) return clip(redact(note(match)), 40)
+  }
+  return ''
+}
+
+/** 整行注释，没有动作可讲 */
+function isCommentLine(text) {
+  return /^(?:\/\/|#|\/\*|\*|\*\/)/.test(text)
+}
+
+/** 一行 Python → 一句说明；语言包不中就走通用规则，再没有就留空 */
+export function explainPythonLine(line) {
+  const text = str(line).trim()
+  if (!text || isCommentLine(text)) return ''
+  return applyLanguageRules(PY_RULES, text) || explainCodeLine(text)
+}
+
+/** 一行 Java → 一句说明；语言包不中就走通用规则，再没有就留空 */
+export function explainJavaLine(line) {
+  const text = str(line).trim()
+  if (!text) return ''
+  // TODO / FIXME 通常写在注释里，注释闸门得给它让路
+  if (/\b(?:TODO|FIXME)\b/.test(text)) return '待办：这里还没写完'
+  if (isCommentLine(text)) return ''
+  return applyLanguageRules(JAVA_RULES, text) || explainCodeLine(text)
+}
+
 /**
  * 整段代码 → 逐行说明数组（与行一一对应，没有说明的位置是空字符串）。
  * @param {string} code
- * @param {string} [lang] 代码块语言；shell 类语言整行按命令行处理
+ * @param {string} [lang] 代码块语言；shell 类语言整行按命令行处理，Tier 2 语言先过语言包
  * @returns {string[]}
  */
 export function explainCodeLines(code, lang) {
@@ -654,8 +723,15 @@ export function explainCodeLines(code, lang) {
   const detection = detectDialect(lines.join('\n'), lang)
   // 认不准的块不逐行硬凑：块级总述交给上层，行尾保持空白
   if (!shouldExplainPerLine(detection)) return lines.map(() => '')
-  const commandLike = detection.lang === 'shell' || detection.lang === 'powershell'
-  return lines.map((line) => (commandLike ? explainCommandLine(line) : explainCodeLine(line)))
+  const explainer =
+    detection.lang === 'shell' || detection.lang === 'powershell'
+      ? explainCommandLine
+      : detection.lang === 'python'
+        ? explainPythonLine
+        : detection.lang === 'java'
+          ? explainJavaLine
+          : explainCodeLine
+  return lines.map((line) => explainer(line))
 }
 
 /* ── 教学层：这一行用了什么通用写法 ─────────────────────────────────── */
