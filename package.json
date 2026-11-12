@@ -44,6 +44,16 @@
   "engines": {
     "node": ">=20"
   },
-  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiaoluoli45/dsh-code-explainer.git"
+  },
+  "homepage": "https://github.com/xiaoluoli45/dsh-code-explainer#readme",
+  "bugs": {
+    "url": "https://github.com/xiaoluoli45/dsh-code-explainer/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "MIT"
 }
